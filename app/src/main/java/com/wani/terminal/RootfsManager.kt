@@ -257,6 +257,7 @@ class RootfsManager(context: Context) {
      * Pehle string level par check, phir maujood parent directories ka real (symlink-resolved) path.
      */
     private fun safeChild(base: File, name: String): File {
+        if (File(base, name).absoluteFile.normalize() == base.absoluteFile.normalize()) return File(base, name)
         val root = base.canonicalFile
         val lexicalRoot = base.absoluteFile.normalize()
         val child = File(base, name)

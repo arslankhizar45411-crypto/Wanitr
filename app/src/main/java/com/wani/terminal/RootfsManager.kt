@@ -253,11 +253,10 @@ class RootfsManager(context: Context) {
     }
 
     /**
-     * Archive ke path ko bahar nikalne se rokta hai (../ attacks aur symlink ke zariye escape bhi).
-     * Pehle string level par check, phir maujood parent directories ka real (symlink-resolved) path.
+     * Archive ke path ko bahar nikalne se rokta hai (../ aur symlink escape).
+     * Archive ki root entry ("./") ko allow karta hai.
      */
     private fun safeChild(base: File, name: String): File {
-        if (File(base, name).absoluteFile.normalize() == base.absoluteFile.normalize()) return File(base, name)
         val root = base.canonicalFile
         val lexicalRoot = base.absoluteFile.normalize()
         val child = File(base, name)
@@ -265,7 +264,7 @@ class RootfsManager(context: Context) {
         if (!lexical.toPath().startsWith(lexicalRoot.toPath())) {
             throw IOException("Unsafe path in archive: $name")
         }
-        // Sabse qareeb maujood parent ka real path nikalo
+        if (lexical == lexicalRoot) return child
         var existing: File? = lexical.parentFile
         while (existing != null && !existing.exists()) existing = existing.parentFile
         val realParent = existing?.canonicalFile ?: root

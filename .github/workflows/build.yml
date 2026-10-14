@@ -15,7 +15,6 @@ on:
 permissions:
   contents: read
 
-# Naye push par purani run cancel. Tag builds cancel nahi hote.
 concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
@@ -28,16 +27,13 @@ env:
 jobs:
   build:
     name: Build debug APK
-    # ubuntu-latest 19 Oct 2026 ko Ubuntu 26 par move ho raha hai: stable version pin rakha hai
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      # Repo > Settings > Secrets and variables > Actions > Variables
       ROOTFS_URL: ${{ vars.ROOTFS_URL }}
       ROOTFS_SHA256: ${{ vars.ROOTFS_SHA256 }}
       PROOT_URL: ${{ vars.PROOT_URL }}
       PROOT_LOADER_URL: ${{ vars.PROOT_LOADER_URL }}
-      # Tags aur manual "strict" run par sab cheezein zaroori hain
       STRICT: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.strict) }}
     steps:
       - name: Checkout
@@ -51,13 +47,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
       - name: Install Android SDK components
         run: |
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-          sdkmanager --install "$ANDROID_PLATFORM" "$ANDROID_BUILD_TOOLS" "platform-tools"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || SDKMANAGER="$(command -v sdkmanager)"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "$ANDROID_PLATFORM" "$ANDROID_BUILD_TOOLS" "platform-tools"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4

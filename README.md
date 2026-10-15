@@ -1,35 +1,43 @@
-# Wani Terminal v1.3
+# Wani Terminal v1.4
 
-Android app jo Debian (proot) chala kar asli Linux shell deti hai.
+An Android app that runs a real Debian (proot) Linux shell, with a built-in AI assistant.
 
-## Is version mein kya naya hai
+## What's new in 1.4
 
-- **Tap-to-type:** input bar nahi hai. Terminal screen par tap karein to keyboard khulta hai, aur keys seedha shell ko jaati hain (nano, vim, top ke liye). Keyboard chip (⌨) se bhi khul jata hai.
-- **Full-screen apps:** nano, vim, top, htop ka screen sahi draw hota hai (cursor movement, alternate screen, scroll region).
-- **Ctrl / Alt keys:** `Ctrl` aur `Alt` sticky toggle hain. `^O ^X ^S ^W ^K ^G ^C ^Z` waghera ki chips hain.
-- **Arrows, Esc, Home, End, PgUp, PgDn, Del, Ins** ki chips.
-- **Graphics:** shell mein `wani-show chart.png` chalayein, image upar strip mein aati hai. Tap karke preview aur "Save to Downloads".
-- **Charts:** `wani-install-charts` (pehli dafa), phir `wani-chart-demo`.
-- **Setup:** 2 clear steps (package list, basic tools: nano, python3, git, curl). Har line par progress.
+- **Simple first-run setup.** It downloads and prepares Debian in the background, then opens the terminal. It does not install Python or any other packages. Install what you need yourself, for example `apt-get update && apt-get install python3`.
+- **One-line shortcut bar.** Ctrl, Alt, Tab, arrows, Esc, Home/End/PgUp/PgDn, ^C ^D ^Z and more, symbols, and the AI button all sit in one horizontally scrollable line.
+- **Sideways scroll** for long terminal lines instead of wrapping them.
+- **AI assistant** (AI button, or type `@ai <question>` in the shell):
+  - Works with any OpenAI-compatible API. Set the base URL, model and API key in Settings.
+  - Can run shell commands and create files. Each command asks Yes/No first, unless you turn on "Run without asking".
+  - Can read files in `/root` and in Downloads (`/sdcard/Download`). Storage access is asked for once, with Yes/No.
+- **Storage helper.** `wani-setup-storage` links `~/storage/downloads` to the Downloads folder.
+- **GitHub build page.** Paste a GitHub token, enter `owner/repo`, tap Connect, then Start APK build. Check latest build shows the status and opens the run page, where the APK is in Artifacts.
+- All UI text is in English.
 
 ## Build
 
 Repo variables (Settings > Secrets and variables > Actions > Variables):
-- `ROOTFS_URL`: arm64 Debian rootfs ka public link
-- `ROOTFS_SHA256`: us file ka SHA-256
-- `PROOT_URL` (optional): `libproot.so` ka link, agar repo mein na ho
+- `ROOTFS_URL`: public link to an arm64 Debian rootfs (.tar.xz)
+- `ROOTFS_SHA256`: SHA-256 of that file
+- `PROOT_URL` (optional): link to `libproot.so`, if it is not in the repo
 
 Workflow: `.github/workflows/build.yml`. Manual run: Actions > build-apk > Run workflow.
 
-## Helper commands (rootfs ke andar)
+## Helper commands (inside the Linux shell)
 
-- `wani-show FILE` : png/jpg/gif/webp ko graphics strip mein bhejta hai
-- `wani-install-charts` : matplotlib install karta hai
-- `wani-chart-demo` : demo chart banata aur dikhata hai
+- `wani-setup-storage` : link phone storage (Downloads) into `~/storage`
+- `wani-show FILE` : send a png/jpg/gif/webp to the graphics strip
+- `wani-install-charts` : install matplotlib (only when you want it)
+- `wani-chart-demo` : draw a demo chart
+
+## Security notes
+
+- The AI API key and GitHub token are stored in the app's private settings on the phone. They are sent only to the API or GitHub you configured.
+- Turn on "Run without asking" only if you trust what the AI will do.
 
 ## Limitations
 
-- Terminal ka size shell start hone par fix hota hai. Rotate ya keyboard ke baad naya size lene ke liye menu se "Restart shell".
-- SVG images abhi nahi dikhti (sirf bitmap formats).
-- Kuch keyboards (Gboard composition) mein duplicate letters aa sakte hain. Aise mein suggestions band karke type karein.
-- targetSdk 28 (proot ke liye). Play Store par nahi chalegi, sirf APK sideload.
+- Terminal size is set when the shell starts. After rotating or changing the keyboard, use Restart shell.
+- SVG images are not shown (bitmap formats only).
+- targetSdk 28 (needed for proot). Not for the Play Store; install the APK directly.

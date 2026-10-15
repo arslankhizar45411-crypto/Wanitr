@@ -127,7 +127,7 @@ class ShellSession(private val context: Context) {
     private fun addImage(bytes: ByteArray, name: String) {
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         if (bmp == null) {
-            scope.launch { appendSystem("[image decode nahi hui: $name]") }
+            scope.launch { appendSystem("[could not decode image: $name]") }
             return
         }
         val item = TermImage(nextImageId++, name, bytes, bmp.asImageBitmap())
@@ -267,8 +267,9 @@ class ShellSession(private val context: Context) {
 
         private val BANNER =
             "\u001B[32m" + ART + "\u001B[0m\r\n\r\n" +
-                "Welcome to Wani Terminal v1.3 by Mecotina\r\n" +
-                "Screen par tap karke keyboard kholein, keys seedha shell ko jaayengi.\r\n" +
-                "Graphics: 'wani-show chart.png' | Charts: 'wani-install-charts' phir 'wani-chart-demo'\r\n\r\n"
+                "Welcome to Wani Terminal v1.4\r\n" +
+                "Tap the screen to type. Keys go straight to the shell.\r\n" +
+                "AI: tap AI, or type @ai <question> in the shell.\r\n" +
+                "Setup: run wani-setup-storage to link Downloads.\r\n\r\n"
     }
 }

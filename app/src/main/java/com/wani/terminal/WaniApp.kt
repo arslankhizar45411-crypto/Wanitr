@@ -16,9 +16,17 @@ class WaniApp : Application() {
     lateinit var shell: ShellSession
         private set
 
+    lateinit var settings: AppSettings
+        private set
+
+    lateinit var ai: AiChat
+        private set
+
     override fun onCreate() {
         super.onCreate()
+        settings = AppSettings(this)
         rootfs = RootfsManager(this)
         shell = ShellSession(this)
+        ai = AiChat(this)
     }
 }

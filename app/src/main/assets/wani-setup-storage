@@ -1,0 +1,20 @@
+#!/bin/sh
+# wani-setup-storage : phone storage (Downloads) ko shell mein link karta hai.
+#   ~/storage/downloads -> Downloads folder
+#   ~/storage/shared    -> phone ka internal storage
+# Pehle app mein storage permission allow karni hogi (Settings > Storage > Allow storage).
+
+if [ ! -r /sdcard ]; then
+  echo "Storage is not available yet."
+  echo "Open Wani Terminal > Settings > Storage and tap 'Allow storage', then run this again."
+  exit 1
+fi
+
+mkdir -p "$HOME/storage"
+ln -sfn /sdcard "$HOME/storage/shared"
+ln -sfn /sdcard/Download "$HOME/storage/downloads"
+
+echo "Storage is ready:"
+echo "  ~/storage/downloads -> Downloads"
+echo "  ~/storage/shared    -> internal storage"
+echo "Try: ls ~/storage/downloads"

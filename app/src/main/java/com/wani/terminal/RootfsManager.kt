@@ -106,43 +106,21 @@ class RootfsManager(context: Context) {
         }
     }
 
-    /** Setup ke 2 steps: package list update, phir zaroori tools install. */
-    private suspend fun bootstrap() {
+    /**
+     * Setup ka aakhri hissa. Koi package (python, matplotlib waghera) yahan install NAHI hota:
+     * user khud jo chahe install karega. Yahan sirf helper commands aur storage folder bante hain.
+     */
+    private fun bootstrap() {
+        _state.value = SetupState.Bootstrapping("Configuring the terminal")
         writeHelpers()
-        runStep(
-            "Step 1/2: package list update",
-            "apt-get update"
-        )
-        runStep(
-            "Step 2/2: basic tools install (nano, python3, git, curl...)",
-            "apt-get install -y --no-install-recommends " +
-                "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold " +
-                "nano less procps curl wget git file ca-certificates python3"
-        )
+        File(rootfsDir, "sdcard").mkdirs()
         _state.value = SetupState.Bootstrapping("Setup complete")
-    }
-
-    /** Ek apt step chalata hai. Har line par state update, aur fail hone par aakhri lines error mein. */
-    private suspend fun runStep(title: String, command: String) {
-        _state.value = SetupState.Bootstrapping(title)
-        val tail = ArrayDeque<String>()
-        val code = ProotRunner.runOnce(appContext, listOf("/bin/sh", "-c", command)) { line ->
-            if (line.isNotBlank()) {
-                _state.value = SetupState.Bootstrapping("$title\n${line.take(120)}")
-                tail.addLast(line.take(160))
-                if (tail.size > 4) tail.removeFirst()
-            }
-        }
-        if (code != 0) {
-            error("$title fail hua (exit code $code)\n" + tail.joinToString("\n"))
-        }
     }
 
     /** wani-show aur wani-install-charts ko rootfs ke /usr/local/bin mein copy karta hai. */
     fun writeHelpers() {
-        val bin = File(rootfsDir, "usr/local/bin")
-        if (!bin.isDirectory) return
-        for (name in listOf("wani-show", "wani-install-charts", "wani-chart-demo")) {
+        val bin = File(rootfsDir, "usr/local/bin").apply { mkdirs() }
+        for (name in listOf("wani-show", "wani-install-charts", "wani-chart-demo", "wani-setup-storage")) {
             val dest = File(bin, name)
             appContext.assets.open(name).use { input ->
                 FileOutputStream(dest).use { out -> input.copyTo(out) }
@@ -265,7 +243,7 @@ class RootfsManager(context: Context) {
 
     /** DNS, mount points, aur apt ki zaroori settings (bina inke apt-get update fail hota hai). */
     private fun prepareRootfs() {
-        for (d in listOf("dev", "proc", "sys", "tmp", "root", "etc", "usr/local/bin")) {
+        for (d in listOf("dev", "proc", "sys", "tmp", "root", "etc", "usr/local/bin", "sdcard")) {
             File(rootfsDir, d).mkdirs()
         }
         File(rootfsDir, "tmp").apply {

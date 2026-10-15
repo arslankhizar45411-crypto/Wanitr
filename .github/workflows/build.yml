@@ -1,41 +1,109 @@
-name: Build APK
+name: build-apk
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
   workflow_dispatch:
+    inputs:
+      strict:
+        description: 'Strict mode: fail if proot binary or rootfs settings are missing'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  GRADLE_VERSION: '8.7'
+  ANDROID_PLATFORM: 'platforms;android-34'
+  ANDROID_BUILD_TOOLS: 'build-tools;34.0.0'
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-
+    name: Build debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ROOTFS_URL: ${{ vars.ROOTFS_URL }}
+      ROOTFS_SHA256: ${{ vars.ROOTFS_SHA256 }}
+      PROOT_URL: ${{ vars.PROOT_URL }}
+      PROOT_LOADER_URL: ${{ vars.PROOT_LOADER_URL }}
+      STRICT: ${{ startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.strict) }}
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
 
-    - name: Set up JDK 17
-      uses: actions/setup-java@v4
-      with:
-        distribution: 'temurin'
-        java-version: '17'
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
 
-    - name: Setup Proot Binaries Directory
-      run: |
-        mkdir -p app/src/main/jniLibs/arm64-v8a
-        # Ensure proper files or placeholders exist if needed
-        touch app/src/main/jniLibs/arm64-v8a/.gitkeep
+      - name: Install Android SDK components
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || SDKMANAGER="$(command -v sdkmanager)"
+          yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
+          "$SDKMANAGER" --install "$ANDROID_PLATFORM" "$ANDROID_BUILD_TOOLS" "platform-tools"
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ env.GRADLE_VERSION }}
 
-    - name: Generate Gradle Wrapper
-      run: gradle wrapper
+      - name: Show toolchain versions
+        run: |
+          java -version
+          gradle --version | head -n 12
+      - name: Fetch proot binaries (optional)
+        run: bash scripts/fetch-proot.sh
 
-    - name: Grant execute permission for gradlew
-      run: chmod +x gradlew
+      - name: Build debug APK
+        run: gradle assembleDebug --stacktrace --no-daemon --console=plain
 
-    - name: Build Debug APK
-      run: ./gradlew assembleDebug
+      - name: Verify and package APK
+        run: |
+          VERSION="$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)"
+          bash scripts/verify-apk.sh \
+            app/build/outputs/apk/debug/app-debug.apk "$STRICT" dist
+          mv "dist/app-debug.apk" "dist/wani-terminal-v${VERSION}-debug.apk"
+          mv "dist/app-debug.apk.sha256" "dist/wani-terminal-v${VERSION}-debug.apk.sha256"
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: wani-terminal-debug
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
 
-    - name: Upload APK
-      uses: actions/upload-artifact@v4
-      with:
-        name: wani-terminal-debug
-        path: app/build/outputs/apk/debug/app-debug.apk
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: wani-terminal-debug
+          path: dist
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "Wani Terminal $TAG" --generate-notes
+          fi

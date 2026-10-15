@@ -1,7 +1,13 @@
 package com.wani.terminal
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.widget.Toast
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -12,14 +18,23 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -31,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.launch
+import java.io.File
 
 private val Bg = Color(0xFF0D0E14)
 private val Panel = Color(0xFF171923)
@@ -48,6 +64,9 @@ private val TermStyle = TextStyle(
     lineHeight = 18.sp,
     color = TextMain
 )
+
+/** Live typing ke liye marker. Field mein hamesha ye hota hai, taake Backspace pakda ja sake. */
+private const val SENTINEL = "\u200B"
 
 fun startTerminalService(context: Context) {
     ContextCompat.startForegroundService(context, Intent(context, TerminalService::class.java))
@@ -97,7 +116,7 @@ private fun describe(state: SetupState): StepInfo = when (state) {
     is SetupState.Verifying -> StepInfo("Verifying download", "Checking SHA-256 checksum", null)
     is SetupState.Extracting -> StepInfo(
         "Extracting files",
-        "${state.files} files done. This can take a few minutes",
+        "${state.files} files extract ho chuki hain (taqreeban 5500 hoti hain)",
         null
     )
     is SetupState.Bootstrapping -> StepInfo("Configuring system", state.message, null)
@@ -171,7 +190,7 @@ fun SetupScreen(state: SetupState, onRetry: () -> Unit) {
                             color = if (isError) TextMain else Muted,
                             fontSize = 12.sp,
                             fontFamily = FontFamily.Monospace,
-                            maxLines = if (isError) 8 else 2
+                            maxLines = if (isError) 10 else 3
                         )
                     }
                     if (isError) {
@@ -192,23 +211,87 @@ fun SetupScreen(state: SetupState, onRetry: () -> Unit) {
 
 // ---------------------------------------------------------------- Terminal screen
 
+/** Ctrl+letter ka control code. */
+private fun ctrlCode(ch: Char): String {
+    val u = ch.uppercaseChar()
+    return when {
+        u in '@'..'_' -> (u.code - 0x40).toChar().toString()
+        ch == ' ' -> "\u0000"
+        ch == '?' -> "\u007F"
+        else -> ch.toString()
+    }
+}
+
+/** Typed text ko shell ke liye tayyar karta hai (Ctrl/Alt sticky keys ke saath). */
+private fun encodeTyped(text: String, ctrl: Boolean, alt: Boolean): String {
+    val sb = StringBuilder()
+    for ((i, ch) in text.withIndex()) {
+        if (i == 0 && alt) sb.append('\u001B')
+        when {
+            i == 0 && ctrl -> sb.append(ctrlCode(ch))
+            ch == '\n' -> sb.append('\r')
+            else -> sb.append(ch)
+        }
+    }
+    return sb.toString()
+}
+
+/** Inline image ko Downloads folder mein save karta hai. Result message return karta hai. */
+fun saveToDownloads(context: Context, name: String, bytes: ByteArray): String {
+    val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "image.png" }
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, safe)
+            put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS)
+        }
+        val uri = context.contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("Downloads mein entry nahi bani")
+        context.contentResolver.openOutputStream(uri)?.use { it.write(bytes) }
+            ?: throw IllegalStateException("File likhne mein masla")
+        return "Downloads/$safe mein save ho gayi"
+    }
+    val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+    dir.mkdirs()
+    val file = File(dir, safe)
+    file.writeBytes(bytes)
+    return "Saved: ${file.absolutePath}"
+}
+
 @Composable
 fun TerminalScreen(shell: ShellSession) {
     val text by shell.text.collectAsState()
     val running by shell.running.collectAsState()
     val pty by shell.pty.collectAsState()
-    var input by remember { mutableStateOf("") }
+    val alt by shell.altScreen.collectAsState()
+    val images by shell.images.collectAsState()
+
+    // Chhupa hua field: keyboard isi ke zariye khulta hai. Hamesha SENTINEL par rehta hai.
+    var field by remember { mutableStateOf(SENTINEL) }
+    var ctrlKey by remember { mutableStateOf(false) }
+    var altKey by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var follow by remember { mutableStateOf(true) }
+    var preview by remember { mutableStateOf<TermImage?>(null) }
+
     val scroll = rememberScrollState()
     val ctx = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val measurer = rememberTextMeasurer()
     val cell = remember(measurer) { measurer.measure("M", TermStyle).size }
+    val focusRequester = remember { FocusRequester() }
+    val keyboard = LocalSoftwareKeyboardController.current
 
-    // Output badhe to neeche scroll karo, lekin agar user ne upar scroll kiya ho to nahi
+    fun showKeyboard() {
+        focusRequester.requestFocus()
+        keyboard?.show()
+    }
+
+    // Full-screen app (nano/top) ke time upar se dikhao, normal output mein neeche follow karo
+    LaunchedEffect(alt) {
+        if (alt) scroll.scrollTo(0)
+    }
     LaunchedEffect(scroll.maxValue) {
-        if (follow) scroll.scrollTo(scroll.maxValue)
+        if (follow && !alt) scroll.scrollTo(scroll.maxValue)
     }
     LaunchedEffect(scroll) {
         snapshotFlow { scroll.isScrollInProgress }.collect { moving ->
@@ -216,24 +299,71 @@ fun TerminalScreen(shell: ShellSession) {
         }
     }
 
-    fun submit() {
-        val line = input
-        input = ""
-        follow = true
-        shell.send(line + "\n", echo = true)
-    }
-
-    // Likha hua text pehle shell ko bhejo, phir special key (taake Tab completion waghera sahi chale)
-    fun key(seq: String) {
-        if (input.isNotEmpty()) {
-            shell.send(input)
-            input = ""
-        }
+    /** Seedha key sequence bhejta hai (Esc, arrows, Ctrl+X waghera). */
+    fun sendRaw(seq: String) {
         follow = true
         shell.send(seq)
     }
 
+    /** Typed text bhejta hai, Ctrl/Alt sticky keys ke saath. PTY na ho to local echo bhi hota hai. */
+    fun sendTyped(typed: String) {
+        val out = encodeTyped(typed, ctrlKey, altKey)
+        if (ctrlKey || altKey) {
+            ctrlKey = false
+            altKey = false
+        }
+        follow = true
+        shell.send(out, echo = !pty)
+    }
+
+    fun sendEnter() {
+        follow = true
+        if (pty) shell.send("\r") else shell.send("\n", echo = true)
+    }
+
+    /** Hidden field ka har badlao: naye characters foran shell ko, Backspace DEL bhejta hai. */
+    fun onFieldChange(newValue: String) {
+        val hadSentinel = newValue.contains(SENTINEL)
+        val typed = newValue.replace(SENTINEL, "")
+        if (!hadSentinel) shell.send("\u007F")
+        if (typed.isNotEmpty()) sendTyped(typed)
+        field = SENTINEL
+    }
+
+    val extraKeys = listOf(
+        "Esc" to "\u001B", "↑" to "\u001B[A", "↓" to "\u001B[B", "←" to "\u001B[D", "→" to "\u001B[C",
+        "Home" to "\u001B[H", "End" to "\u001B[F", "PgUp" to "\u001B[5~", "PgDn" to "\u001B[6~",
+        "Del" to "\u001B[3~", "Ins" to "\u001B[2~"
+    )
+    val ctrlKeys = listOf(
+        "C" to "\u0003", "D" to "\u0004", "Z" to "\u001A", "O" to "\u000F", "X" to "\u0018",
+        "S" to "\u0013", "W" to "\u0017", "K" to "\u000B", "G" to "\u0007", "L" to "\u000C",
+        "A" to "\u0001", "E" to "\u0005", "R" to "\u0012", "U" to "\u0015", "T" to "\u0014"
+    )
+    val symbols = listOf(
+        "|", "~", "/", "-", "_", "*", "&", "\$", "'", "\"", ";", ":", "\\", "<", ">",
+        "!", "?", "#", "@", "%", "=", "+", "(", ")", "[", "]", "{", "}", "`"
+    )
+
     Column(modifier = Modifier.fillMaxSize().background(Bg)) {
+        // Chhupa hua input (1dp). Ye focus mein rehta hai, isliye keyboard khulta hai.
+        BasicTextField(
+            value = field,
+            onValueChange = { onFieldChange(it) },
+            singleLine = true,
+            textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
+            cursorBrush = SolidColor(Color.Transparent),
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrect = false,
+                imeAction = ImeAction.Send
+            ),
+            keyboardActions = KeyboardActions(onSend = { sendEnter() }),
+            modifier = Modifier
+                .size(1.dp)
+                .focusRequester(focusRequester)
+        )
+
         // Header
         Row(
             modifier = Modifier
@@ -252,7 +382,11 @@ fun TerminalScreen(shell: ShellSession) {
             Spacer(Modifier.width(10.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text("Wani Terminal", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                Text("by Mecotina", color = Muted, fontSize = 11.sp)
+                Text(
+                    if (alt) "full-screen app" else "screen par tap karke type karein",
+                    color = Muted,
+                    fontSize = 11.sp
+                )
             }
             StatusPill(running)
             Box {
@@ -270,8 +404,8 @@ fun TerminalScreen(shell: ShellSession) {
                     DropdownMenuItem(
                         text = { Text("Paste") },
                         onClick = {
-                            val clip = clipboard.getText()?.text
-                            if (clip != null) input += clip.replace("\r", "").replace("\n", " ")
+                            val clip = clipboard.getText()?.text ?: ""
+                            sendTyped(clip)
                             menuOpen = false
                         }
                     )
@@ -279,6 +413,21 @@ fun TerminalScreen(shell: ShellSession) {
                         text = { Text("Clear screen") },
                         onClick = {
                             shell.clear()
+                            if (pty) sendRaw("\u000C")
+                            menuOpen = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Clear graphics") },
+                        onClick = {
+                            shell.clearImages()
+                            menuOpen = false
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Install charts (matplotlib)") },
+                        onClick = {
+                            if (pty) shell.send("wani-install-charts\r")
                             menuOpen = false
                         }
                     )
@@ -294,20 +443,22 @@ fun TerminalScreen(shell: ShellSession) {
             }
         }
 
-        // Terminal output
+        // Terminal output: tap karne par keyboard khulta hai
         BoxWithConstraints(
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
                 .background(TermBg)
+                .pointerInput(Unit) {
+                    detectTapGestures(onTap = { showKeyboard() })
+                }
         ) {
-            val padPx = with(androidx.compose.ui.platform.LocalDensity.current) { 10.dp.toPx() }
+            val padPx = with(LocalDensity.current) { 10.dp.toPx() }
             val cols = ((constraints.maxWidth - 2 * padPx) / cell.width).toInt().coerceAtLeast(20)
             val rows = ((constraints.maxHeight - 2 * padPx) / cell.height).toInt().coerceAtLeast(5)
 
-            // Size pata chalne ke baad hi shell start karo, taake PTY ka size sahi ho.
-            // Keyboard khulne/band hone par rows badalte hain: sirf size update hota hai,
-            // service dobara start nahi hoti (pehle har dafa start hoti thi).
+            // Size pata chalne ke baad shell start karo, taake PTY ka size sahi ho.
+            // Keyboard khulne par size sirf store hota hai; service dobara start nahi hoti.
             LaunchedEffect(cols, rows) {
                 shell.setSize(cols, rows)
                 if (!shell.running.value) startTerminalService(ctx)
@@ -323,13 +474,71 @@ fun TerminalScreen(shell: ShellSession) {
             )
         }
 
-        // Special keys
+        // Graphics strip: wani-show se aayi images
+        if (images.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Panel)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                images.forEach { img ->
+                    Image(
+                        bitmap = img.bitmap,
+                        contentDescription = img.name,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(64.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { preview = img }
+                    )
+                }
+                KeyChip("Clear") { shell.clearImages() }
+            }
+        }
+
+        // Full-screen keys (sirf PTY mode mein)
+        if (pty) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Panel)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                KeyChip("Ctrl", active = ctrlKey) { ctrlKey = !ctrlKey }
+                KeyChip("Alt", active = altKey) { altKey = !altKey }
+                extraKeys.forEach { (label, seq) ->
+                    KeyChip(label) { sendRaw(seq) }
+                }
+            }
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Panel)
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                ctrlKeys.forEach { (letter, seq) ->
+                    KeyChip("^$letter") { sendRaw(seq) }
+                }
+            }
+        }
+
+        // Basic keys + symbols (dono modes)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Panel)
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 8.dp, vertical = 6.dp),
+                .padding(horizontal = 8.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
@@ -339,91 +548,46 @@ fun TerminalScreen(shell: ShellSession) {
                     shell.restart()
                 }
             }
-            if (pty) KeyChip("Esc") { key("\u001B") }
+            KeyChip("⌨") { showKeyboard() }
             KeyChip("Tab") {
-                if (pty) {
-                    key("\t")
-                } else {
-                    input += "  "
-                }
+                if (pty) sendRaw("\t") else sendTyped("  ")
             }
-            KeyChip("Ctrl+C") {
-                input = ""
-                shell.interrupt()
+            KeyChip("⌫") { sendRaw("\u007F") }
+            if (!pty) {
+                KeyChip("^C") { shell.interrupt() }
             }
-            if (pty) KeyChip("Ctrl+D") { key("\u0004") }
-            KeyChip("Ctrl+L") {
-                shell.clear()
-                if (pty) shell.send("\u000C")
-            }
-            if (pty) {
-                KeyChip("↑") { key("\u001B[A") }
-                KeyChip("↓") { key("\u001B[B") }
-                KeyChip("←") { key("\u001B[D") }
-                KeyChip("→") { key("\u001B[C") }
-                KeyChip("Home") { key("\u001B[H") }
-                KeyChip("End") { key("\u001B[F") }
-            }
-            KeyChip("⌫") {
-                if (input.isNotEmpty()) {
-                    input = input.dropLast(1)
-                } else if (pty) {
-                    key("\u007F")
-                }
-            }
-            listOf(
-                "|", "~", "/", "-", "_", "*", "&", "\$", "'", "\"", ";", ":",
-                "\\", "<", ">", "!", "?", "#", "@", "%", "=", "+", "(", ")",
-                "[", "]", "{", "}"
-            ).forEach { ch ->
-                KeyChip(ch) { input += ch }
+            symbols.forEach { s ->
+                KeyChip(s) { sendTyped(s) }
             }
         }
+    }
 
-        // Input
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(Panel)
-                .padding(start = 8.dp, end = 8.dp, bottom = 8.dp, top = 2.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = input,
-                onValueChange = { input = it },
-                modifier = Modifier.weight(1f),
-                singleLine = true,
-                shape = RoundedCornerShape(12.dp),
-                placeholder = { Text("Type a command", color = Muted) },
-                textStyle = TextStyle(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 14.sp,
-                    color = TextMain
-                ),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = Accent,
-                    unfocusedBorderColor = Chip,
-                    cursorColor = Accent,
-                    focusedTextColor = TextMain,
-                    unfocusedTextColor = TextMain
-                ),
-                keyboardOptions = KeyboardOptions(
-                    capitalization = KeyboardCapitalization.None,
-                    autoCorrect = false,
-                    imeAction = ImeAction.Send
-                ),
-                keyboardActions = KeyboardActions(onSend = { submit() })
-            )
-            Spacer(Modifier.width(8.dp))
-            Button(
-                onClick = { submit() },
-                modifier = Modifier.height(56.dp),
-                shape = RoundedCornerShape(12.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
-            ) {
-                Text("Send", fontWeight = FontWeight.Bold)
+    // Image preview + save
+    preview?.let { img ->
+        AlertDialog(
+            onDismissRequest = { preview = null },
+            title = { Text(img.name, fontSize = 14.sp) },
+            text = {
+                Image(
+                    bitmap = img.bitmap,
+                    contentDescription = img.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    val msg = runCatching { saveToDownloads(ctx, img.name, img.bytes) }
+                        .getOrElse { "Save nahi hui: ${it.message}" }
+                    Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                }) {
+                    Text("Save to Downloads")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { preview = null }) { Text("Close") }
             }
-        }
+        )
     }
 }
 
@@ -449,22 +613,28 @@ private fun StatusPill(running: Boolean) {
 }
 
 @Composable
-private fun KeyChip(label: String, accent: Boolean = false, onClick: () -> Unit) {
+private fun KeyChip(label: String, accent: Boolean = false, active: Boolean = false, onClick: () -> Unit) {
+    val bg = when {
+        accent -> Accent
+        active -> Accent.copy(alpha = 0.45f)
+        else -> Chip
+    }
+    val fg = if (accent || active) Color.Black else TextMain
     Box(
         modifier = Modifier
-            .heightIn(min = 36.dp)
+            .heightIn(min = 34.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(if (accent) Accent else Chip)
+            .background(bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
+            .padding(horizontal = 10.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
         Text(
             label,
-            color = if (accent) Color.Black else TextMain,
+            color = fg,
             fontFamily = FontFamily.Monospace,
             fontSize = 13.sp,
-            fontWeight = if (accent) FontWeight.Bold else FontWeight.Normal
+            fontWeight = if (accent || active) FontWeight.Bold else FontWeight.Normal
         )
     }
 }

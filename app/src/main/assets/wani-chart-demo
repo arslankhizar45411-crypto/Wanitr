@@ -1,0 +1,19 @@
+#!/bin/sh
+# Demo chart banata hai aur graphics strip mein dikhata hai (pehle wani-install-charts chalayein).
+python3 - << 'PY'
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+x = list(range(12))
+y = [v * v for v in x]
+fig, ax = plt.subplots(figsize=(6, 4), dpi=100)
+ax.plot(x, y, marker="o", color="#2a9d6b", linewidth=2)
+ax.set_title("Wani demo chart: squares")
+ax.set_xlabel("x")
+ax.set_ylabel("x squared")
+ax.grid(alpha=0.3)
+fig.tight_layout()
+fig.savefig("/root/demo-chart.png", facecolor="white")
+print("Chart saved: /root/demo-chart.png")
+PY
+wani-show /root/demo-chart.png

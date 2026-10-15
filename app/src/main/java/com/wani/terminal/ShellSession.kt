@@ -1,6 +1,9 @@
 package com.wani.terminal
 
 import android.content.Context
+import android.graphics.BitmapFactory
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,10 +18,17 @@ import java.io.IOException
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
 
+/** Terminal mein aayi hui inline image (wani-show ya OSC 1337 se). */
+class TermImage(
+    val id: Long,
+    val name: String,
+    val bytes: ByteArray,
+    val bitmap: ImageBitmap
+)
+
 /**
- * Proot ke andar bash chalata hai. Agar rootfs mein `script` maujood ho (Debian mein hota hai)
- * to asli PTY milti hai: colors, Ctrl+C, Tab completion, history, sab chalte hain.
- * Warna plain pipes par fallback hota hai (Ctrl+C shell restart karta hai).
+ * Proot ke andar bash chalata hai. Agar rootfs mein `script` ho (Debian mein hota hai)
+ * to asli PTY milti hai: nano, vim, top, colors, Ctrl+C, Tab, history sab chalte hain.
  */
 class ShellSession(private val context: Context) {
 
@@ -29,6 +39,7 @@ class ShellSession(private val context: Context) {
     private val dirty = Channel<Unit>(Channel.CONFLATED)
     private val outbox = Channel<Outgoing>(Channel.UNLIMITED)
     private val intentionalStops = ConcurrentHashMap.newKeySet<Process>()
+    private var nextImageId = 1L
 
     private var process: Process? = null
     @Volatile private var out: OutputStream? = null
@@ -45,11 +56,20 @@ class ShellSession(private val context: Context) {
     private val _pty = MutableStateFlow(false)
     val pty: StateFlow<Boolean> = _pty.asStateFlow()
 
+    private val _alt = MutableStateFlow(false)
+    val altScreen: StateFlow<Boolean> = _alt.asStateFlow()
+
+    private val _images = MutableStateFlow<List<TermImage>>(emptyList())
+    val images: StateFlow<List<TermImage>> = _images.asStateFlow()
+
     init {
-        // UI ko har 40ms mein ek hi dafa update karo, taake tez output par app na atke
+        buffer.onReply = { reply -> send(reply) }
+        buffer.onImage = { bytes, name -> addImage(bytes, name) }
+        // UI ko 40ms mein ek hi dafa update karo, taake tez output par app na atke
         scope.launch {
             for (ignored in dirty) {
                 _text.value = buffer.snapshot()
+                _alt.value = buffer.isAltScreen()
                 delay(RENDER_INTERVAL_MS)
             }
         }
@@ -91,6 +111,10 @@ class ShellSession(private val context: Context) {
         dirty.trySend(Unit)
     }
 
+    fun clearImages() {
+        _images.value = emptyList()
+    }
+
     /** Shell ko input bhejta hai. echo=true sirf bina-PTY mode mein local echo dikhata hai. */
     fun send(data: String, echo: Boolean = false) {
         outbox.trySend(Outgoing(data, echo))
@@ -98,6 +122,16 @@ class ShellSession(private val context: Context) {
 
     fun shutdown() {
         scope.launch { stopInternal() }
+    }
+
+    private fun addImage(bytes: ByteArray, name: String) {
+        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+        if (bmp == null) {
+            scope.launch { appendSystem("[image decode nahi hui: $name]") }
+            return
+        }
+        val item = TermImage(nextImageId++, name, bytes, bmp.asImageBitmap())
+        _images.value = (_images.value + item).takeLast(30)
     }
 
     private fun writeOut(msg: Outgoing) {
@@ -126,6 +160,9 @@ class ShellSession(private val context: Context) {
         }
 
         val usePty = ProotRunner.hasPty(context)
+        // Grid ko current size par set karo (pichla screen clear hota hai, scrollback rehta hai)
+        buffer.resetGrid(cols, rows)
+
         val args = if (usePty) {
             listOf(
                 "script", "-qfc",
@@ -214,7 +251,7 @@ class ShellSession(private val context: Context) {
     }
 
     private fun appendSystem(msg: String) {
-        appendRaw("\n\u001B[33m$msg\u001B[0m\n")
+        appendRaw("\r\n\u001B[33m$msg\u001B[0m\r\n")
     }
 
     companion object {
@@ -229,8 +266,9 @@ class ShellSession(private val context: Context) {
         """.trimMargin()
 
         private val BANNER =
-            "\u001B[32m" + ART + "\u001B[0m\n\n" +
-                "Welcome to Wani Terminal by Mecotina\n" +
-                "Type a command and press Send.\n\n"
+            "\u001B[32m" + ART + "\u001B[0m\r\n\r\n" +
+                "Welcome to Wani Terminal v1.3 by Mecotina\r\n" +
+                "Screen par tap karke keyboard kholein, keys seedha shell ko jaayengi.\r\n" +
+                "Graphics: 'wani-show chart.png' | Charts: 'wani-install-charts' phir 'wani-chart-demo'\r\n\r\n"
     }
 }

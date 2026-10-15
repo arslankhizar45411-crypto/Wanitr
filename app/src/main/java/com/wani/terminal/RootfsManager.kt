@@ -49,6 +49,11 @@ class RootfsManager(context: Context) {
     )
     val state: StateFlow<SetupState> = _state.asStateFlow()
 
+    init {
+        // Pehle se installed rootfs mein helper commands ko update kar do (naye version ke liye)
+        if (isReady()) runCatching { writeHelpers() }
+    }
+
     private fun isExtracted(): Boolean = ProotRunner.pathExists(File(rootfsDir, "bin/bash"))
 
     fun isReady(): Boolean = doneMarker.isFile && isExtracted()
@@ -101,19 +106,49 @@ class RootfsManager(context: Context) {
         }
     }
 
+    /** Setup ke 2 steps: package list update, phir zaroori tools install. */
     private suspend fun bootstrap() {
-        _state.value = SetupState.Bootstrapping("Running apt-get update...")
+        writeHelpers()
+        runStep(
+            "Step 1/2: package list update",
+            "apt-get update"
+        )
+        runStep(
+            "Step 2/2: basic tools install (nano, python3, git, curl...)",
+            "apt-get install -y --no-install-recommends " +
+                "-o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold " +
+                "nano less procps curl wget git file ca-certificates python3"
+        )
+        _state.value = SetupState.Bootstrapping("Setup complete")
+    }
+
+    /** Ek apt step chalata hai. Har line par state update, aur fail hone par aakhri lines error mein. */
+    private suspend fun runStep(title: String, command: String) {
+        _state.value = SetupState.Bootstrapping(title)
         val tail = ArrayDeque<String>()
-        val code = ProotRunner.runOnce(appContext, listOf("/bin/sh", "-c", "apt-get update")) { line ->
+        val code = ProotRunner.runOnce(appContext, listOf("/bin/sh", "-c", command)) { line ->
             if (line.isNotBlank()) {
-                _state.value = SetupState.Bootstrapping(line.take(120))
+                _state.value = SetupState.Bootstrapping("$title\n${line.take(120)}")
                 tail.addLast(line.take(160))
-                if (tail.size > 3) tail.removeFirst()
+                if (tail.size > 4) tail.removeFirst()
             }
         }
         if (code != 0) {
-            val details = tail.joinToString("\n")
-            error("apt-get update failed (exit code $code)" + if (details.isNotEmpty()) "\n$details" else "")
+            error("$title fail hua (exit code $code)\n" + tail.joinToString("\n"))
+        }
+    }
+
+    /** wani-show aur wani-install-charts ko rootfs ke /usr/local/bin mein copy karta hai. */
+    fun writeHelpers() {
+        val bin = File(rootfsDir, "usr/local/bin")
+        if (!bin.isDirectory) return
+        for (name in listOf("wani-show", "wani-install-charts", "wani-chart-demo")) {
+            val dest = File(bin, name)
+            appContext.assets.open(name).use { input ->
+                FileOutputStream(dest).use { out -> input.copyTo(out) }
+            }
+            dest.setExecutable(true, false)
+            dest.setReadable(true, false)
         }
     }
 
@@ -211,7 +246,7 @@ class RootfsManager(context: Context) {
                                 target.setReadable(true, false)
                             }
 
-                            else -> { /* skip device nodes */ }
+                            else -> { /* device nodes skip */ }
                         }
                         count++
                         if (count % 200 == 0) _state.value = SetupState.Extracting(count)
@@ -219,6 +254,7 @@ class RootfsManager(context: Context) {
                 }
             }
         }
+        _state.value = SetupState.Extracting(count)
 
         check(ProotRunner.pathExists(File(extractDir, "bin/bash"))) {
             "bin/bash not found in rootfs. Check the rootfs URL and format"
@@ -229,7 +265,7 @@ class RootfsManager(context: Context) {
 
     /** DNS, mount points, aur apt ki zaroori settings (bina inke apt-get update fail hota hai). */
     private fun prepareRootfs() {
-        for (d in listOf("dev", "proc", "sys", "tmp", "root", "etc")) {
+        for (d in listOf("dev", "proc", "sys", "tmp", "root", "etc", "usr/local/bin")) {
             File(rootfsDir, d).mkdirs()
         }
         File(rootfsDir, "tmp").apply {

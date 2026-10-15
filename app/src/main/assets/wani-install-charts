@@ -1,0 +1,6 @@
+#!/bin/sh
+# Python charts library (matplotlib) install karta hai. Pehli dafa kuch minute lag sakte hain.
+export DEBIAN_FRONTEND=noninteractive
+echo "matplotlib install ho rahi hai, intezar karein..."
+apt-get update && apt-get install -y --no-install-recommends python3-matplotlib python3-numpy
+echo "Done. Test ke liye: wani-chart-demo"

@@ -1,0 +1,16 @@
+#!/bin/sh
+# wani-show FILE : image ko Wani Terminal ki graphics strip mein bhejta hai.
+# Supported: png, jpg, gif, webp. Tap karne par preview aur "Save to Downloads" milta hai.
+if [ -z "$1" ]; then
+  echo "Usage: wani-show FILE.png"
+  exit 1
+fi
+if [ ! -f "$1" ]; then
+  echo "File nahi mili: $1"
+  exit 1
+fi
+NAME=$(basename "$1" | base64 -w0)
+printf '\033]1337;File=inline=1;name=%s:' "$NAME"
+base64 -w0 "$1"
+printf '\a'
+echo "Graphics strip mein bhej diya: $(basename "$1")"

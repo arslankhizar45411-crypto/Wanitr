@@ -4,14 +4,14 @@ set -e
 DEST="app/src/main/jniLibs/arm64-v8a"
 mkdir -p "$DEST"
 
-echo "Downloading official arm64 proot binaries..."
-# Termux official packages mirror se working so binaries download karein
-curl -L -o "$DEST/libproot.so" "https://raw.githubusercontent.com/termux/proot-distro/master/app/src/main/jniLibs/arm64-v8a/libproot.so" || true
+# Official proot arm64 binaries fetch karne ke liye standard source
+PROOT_URL="${PROOT_URL:-https://github.com/termux/proot/raw/master/src/libproot.so}"
 
-# Agar file size bohot choti hai (yani 404 error page hai), toh fallback link use karein
-if [ ! -s "$DEST/libproot.so" ] || grep -q "404" "$DEST/libproot.so"; then
-  echo "Using fallback source for libproot.so..."
-  curl -L -o "$DEST/libproot.so" "https://github.com/termux/proot/raw/master/src/libproot.so"
+echo "Downloading official libproot.so..."
+curl -L -o "$DEST/libproot.so" "$PROOT_URL" || true
+
+# Check if file is downloaded properly
+if [ ! -f "$DEST/libproot.so" ]; then
+    echo "Error: libproot.so download nahi ho saki."
+    exit 1
 fi
-
-ls -la "$DEST"

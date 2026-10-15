@@ -19,17 +19,11 @@ jobs:
         distribution: 'temurin'
         java-version: '17'
 
-    - name: Download Proot Binaries
+    - name: Setup Proot Binaries Directory
       run: |
         mkdir -p app/src/main/jniLibs/arm64-v8a
-        # Fetching prebuilt proot binaries for arm64-v8a
-        curl -L -o app/src/main/jniLibs/arm64-v8a/libproot.so https://raw.githubusercontent.com/termux/proot-distro/master/app/src/main/jniLibs/arm64-v8a/libproot.so || true
-        # Alternatively, if you have a script or reliable source, let's create dummy/placeholder or download if available
-        # Checking scripts directory if fetch-proot.sh exists
-        if [ -f "scripts/fetch-proot.sh" ]; then
-          chmod +x scripts/fetch-proot.sh
-          ./scripts/fetch-proot.sh || true
-        fi
+        # Ensure proper files or placeholders exist if needed
+        touch app/src/main/jniLibs/arm64-v8a/.gitkeep
 
     - name: Generate Gradle Wrapper
       run: gradle wrapper

@@ -42,6 +42,13 @@ class AppSettings(context: Context) {
             prefs.edit().putBoolean(K_AUTO_APPROVE, value).apply()
         }
 
+    /** true = dark theme (default). */
+    var darkTheme: Boolean
+        get() = prefs.getBoolean(K_DARK, true)
+        set(value) {
+            prefs.edit().putBoolean(K_DARK, value).apply()
+        }
+
     var githubToken: String
         get() = prefs.getString(K_GH_TOKEN, "") ?: ""
         set(value) {
@@ -75,6 +82,7 @@ class AppSettings(context: Context) {
         private const val K_API_KEY = "ai_api_key"
         private const val K_ALLOW_COMMANDS = "ai_allow_commands"
         private const val K_AUTO_APPROVE = "ai_auto_approve"
+        private const val K_DARK = "dark_theme"
         private const val K_GH_TOKEN = "gh_token"
         private const val K_GH_REPO = "gh_repo"
         private const val K_GH_WORKFLOW = "gh_workflow"

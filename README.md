@@ -1,8 +1,16 @@
-# Wani Terminal v1.4
+# Wani Terminal v1.6.1
 
 An Android app that runs a real Debian (proot) Linux shell, with a built-in AI assistant.
 
-## What's new in 1.4
+## What's new in 1.5
+
+- **AI tools:** run commands, start background jobs (check with job_status), type into the visible terminal, write and read files, and open live pages.
+- **Live pages:** the AI can show a small HTML page on the phone to ask you a question. Your answer goes back to the AI.
+- **Upload button** in the AI chat: files are copied to `/root/uploads`, and the AI gets the path.
+- **Light / dark theme** (AI screen header or Settings). The terminal stays dark.
+- Error fixes and cleanup from 1.4.
+
+## What was in 1.4
 
 - **Simple first-run setup.** It downloads and prepares Debian in the background, then opens the terminal. It does not install Python or any other packages. Install what you need yourself, for example `apt-get update && apt-get install python3`.
 - **One-line shortcut bar.** Ctrl, Alt, Tab, arrows, Esc, Home/End/PgUp/PgDn, ^C ^D ^Z and more, symbols, and the AI button all sit in one horizontally scrollable line.

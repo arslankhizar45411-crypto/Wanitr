@@ -152,6 +152,9 @@ fun TerminalScreen(
     val focusRequester = remember { FocusRequester() }
     val keyboard = LocalSoftwareKeyboardController.current
 
+    // Theme badle to terminal ke purane rang bhi naye ho jayen
+    LaunchedEffect(IsDarkTheme) { shell.refreshTheme() }
+
     fun showKeyboard() {
         focusRequester.requestFocus()
         keyboard?.show()
@@ -221,29 +224,6 @@ fun TerminalScreen(
         field = SENTINEL
     }
 
-    val navKeys = listOf(
-        "Esc" to "\u001B",
-        "↑" to "\u001B[A",
-        "↓" to "\u001B[B",
-        "←" to "\u001B[D",
-        "→" to "\u001B[C",
-        "Home" to "\u001B[H",
-        "End" to "\u001B[F",
-        "PgUp" to "\u001B[5~",
-        "PgDn" to "\u001B[6~",
-        "Del" to "\u001B[3~"
-    )
-    val ctrlKeys = listOf(
-        "^A" to "\u0001", "^C" to "\u0003", "^D" to "\u0004", "^E" to "\u0005",
-        "^G" to "\u0007", "^K" to "\u000B", "^L" to "\u000C", "^O" to "\u000F",
-        "^R" to "\u0012", "^S" to "\u0013", "^U" to "\u0015", "^W" to "\u0017",
-        "^X" to "\u0018", "^Z" to "\u001A"
-    )
-    val symbols = listOf(
-        "|", "~", "/", "-", "_", "*", "&", "\$", "'", "\"", ";", ":", "\\", "<", ">",
-        "!", "?", "#", "@", "%", "=", "+", "(", ")", "[", "]", "{", "}", "`"
-    )
-
     Column(modifier = Modifier.fillMaxSize().background(Bg)) {
         // Chhupa hua input (1dp). Ye focus mein rehta hai, isliye keyboard khulta hai.
         BasicTextField(
@@ -287,7 +267,9 @@ fun TerminalScreen(
                     fontSize = 11.sp
                 )
             }
-            StatusPill(running)
+            Box(modifier = Modifier.clickable { if (!running) { startTerminalService(ctx); shell.restart() } }) {
+                StatusPill(running)
+            }
             TextButton(onClick = { onAskAi("") }) {
                 Text("AI", color = Accent, fontWeight = FontWeight.Bold)
             }
@@ -380,7 +362,7 @@ fun TerminalScreen(
 
             Text(
                 text = text,
-                style = TermStyle,
+                style = termTextStyle(),
                 softWrap = false,
                 modifier = Modifier
                     .fillMaxSize()
@@ -416,40 +398,22 @@ fun TerminalScreen(
             }
         }
 
-        // Saare shortcut keys: ek hi line mein (side scroll ho sakti hai)
+        // Sirf 7 buttons, ek hi line mein, barabar size ke
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Panel)
-                .horizontalScroll(barScroll)
-                .padding(horizontal = 6.dp, vertical = 5.dp),
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
+                .padding(horizontal = 4.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            KeyChip("AI", accent = true) { onAskAi("") }
-            if (!running) {
-                KeyChip("Restart", accent = true) {
-                    startTerminalService(ctx)
-                    shell.restart()
-                }
-            }
-            KeyChip("⌨") { showKeyboard() }
-            KeyChip("Ctrl", active = ctrlKey) { ctrlKey = !ctrlKey }
-            KeyChip("Alt", active = altKey) { altKey = !altKey }
-            KeyChip("Tab") { if (pty) sendRaw("\t") else sendTyped("  ") }
-            KeyChip("⌫") { sendBackspace() }
-            KeyChip("Enter") { submitLine() }
-            navKeys.forEach { (label, seq) ->
-                KeyChip(label) { sendRaw(seq) }
-            }
-            ctrlKeys.forEach { (label, seq) ->
-                KeyChip(label) {
-                    if (label == "^C" && !pty) shell.interrupt() else sendRaw(seq)
-                }
-            }
-            symbols.forEach { s ->
-                KeyChip(s) { sendTyped(s) }
-            }
+            KeyButton("Esc", Modifier.weight(1f)) { sendRaw("\u001B") }
+            KeyButton("Tab", Modifier.weight(1f)) { if (pty) sendRaw("\t") else sendTyped("  ") }
+            KeyButton("Ctrl", Modifier.weight(1f), active = ctrlKey) { ctrlKey = !ctrlKey }
+            KeyButton("↑", Modifier.weight(1f)) { sendRaw("\u001B[A") }
+            KeyButton("↓", Modifier.weight(1f)) { sendRaw("\u001B[B") }
+            KeyButton("⌫", Modifier.weight(1f)) { sendBackspace() }
+            KeyButton("AI", Modifier.weight(1f), accent = true) { onAskAi("") }
         }
     }
 

@@ -106,6 +106,11 @@ class ShellSession(private val context: Context) {
         }
     }
 
+    /** Theme badalne par output dobara banao, taake naye rang lagein. */
+    fun refreshTheme() {
+        dirty.trySend(Unit)
+    }
+
     fun clear() {
         buffer.clear()
         dirty.trySend(Unit)
@@ -267,7 +272,7 @@ class ShellSession(private val context: Context) {
 
         private val BANNER =
             "\u001B[32m" + ART + "\u001B[0m\r\n\r\n" +
-                "Welcome to Wani Terminal v1.4\r\n" +
+                "Welcome to Wani Terminal v1.6\r\n" +
                 "Tap the screen to type. Keys go straight to the shell.\r\n" +
                 "AI: tap AI, or type @ai <question> in the shell.\r\n" +
                 "Setup: run wani-setup-storage to link Downloads.\r\n\r\n"

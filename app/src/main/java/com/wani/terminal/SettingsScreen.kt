@@ -47,6 +47,7 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
     var apiKey by remember { mutableStateOf(settings.aiApiKey) }
     var allowCommands by remember { mutableStateOf(settings.aiAllowCommands) }
     var autoApprove by remember { mutableStateOf(settings.aiAutoApprove) }
+    var lightMode by remember { mutableStateOf(!settings.darkTheme) }
     var storageOk by remember { mutableStateOf(StoragePermission.isGranted(ctx)) }
     var saved by remember { mutableStateOf(false) }
 
@@ -66,7 +67,7 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
             SettingField("Model", model, { model = it; saved = false }, "gpt-4o-mini")
             SettingField("API key", apiKey, { apiKey = it; saved = false }, "paste your key", secret = true)
             Text(
-                "Works with any OpenAI-compatible API. The key is stored only on this phone.",
+                "Works with any OpenAI-compatible API. Local server on this phone: http://127.0.0.1:PORT/v1 (key can be empty). The key is stored only on this phone.",
                 color = Muted,
                 fontSize = 12.sp
             )
@@ -82,6 +83,16 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
                 subtitle = "Off (recommended): you approve each command with Yes or No.",
                 checked = autoApprove,
                 onChange = { autoApprove = it; saved = false }
+            )
+            ToggleRow(
+                title = "Light theme",
+                subtitle = "Off = dark theme. The terminal always stays dark.",
+                checked = lightMode,
+                onChange = {
+                    lightMode = it
+                    settings.darkTheme = !it
+                    applyTheme(!it)
+                }
             )
 
             SectionTitle("Storage")

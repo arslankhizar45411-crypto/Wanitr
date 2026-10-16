@@ -25,6 +25,7 @@ class WaniApp : Application() {
     override fun onCreate() {
         super.onCreate()
         settings = AppSettings(this)
+        applyTheme(settings.darkTheme)
         rootfs = RootfsManager(this)
         shell = ShellSession(this)
         ai = AiChat(this)

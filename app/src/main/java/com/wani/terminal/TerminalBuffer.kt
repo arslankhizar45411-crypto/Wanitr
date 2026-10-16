@@ -545,14 +545,14 @@ class TerminalBuffer(maxChars: Int) {
     }
 
     private fun spanFor(c: Cell, cursor: Boolean): SpanStyle? {
-        var fg = if (c.fg != 0) c.fg else DEF_FG
+        var fg = if (c.fg != 0) c.fg else TermColors.fg
         var bg = c.bg
         if (c.inverse != cursor) {
             val t = fg
-            fg = if (bg != 0) bg else DEF_BG
+            fg = if (bg != 0) bg else TermColors.bg
             bg = t
         }
-        if (fg == DEF_FG && bg == 0 && !c.bold && !c.underline) return null
+        if (fg == TermColors.fg && bg == 0 && !c.bold && !c.underline) return null
         return SpanStyle(
             color = Color(fg),
             background = if (bg != 0) Color(bg) else Color.Unspecified,
@@ -578,7 +578,7 @@ class TerminalBuffer(maxChars: Int) {
             val g = 8 + (n - 232) * 10
             rgb(g, g, g)
         }
-        else -> DEF_FG
+        else -> TermColors.fg
     }
 
     private fun level(x: Int): Int = if (x == 0) 0 else 55 + 40 * x
@@ -588,8 +588,6 @@ class TerminalBuffer(maxChars: Int) {
 
     companion object {
         private const val OSC_MAX = 12_000_000
-        private val DEF_FG = 0xFFD7DAE3.toInt()
-        private val DEF_BG = 0xFF11121A.toInt()
 
         private val ANSI16 = intArrayOf(
             0xFF414868.toInt(), 0xFFF7768E.toInt(), 0xFF9ECE6A.toInt(), 0xFFE0AF68.toInt(),
@@ -598,4 +596,10 @@ class TerminalBuffer(maxChars: Int) {
             0xFF8DB0FF.toInt(), 0xFFC7A9FF.toInt(), 0xFFA4DAFF.toInt(), 0xFFC0CAF5.toInt()
         )
     }
+}
+
+/** Terminal ke default rang. Theme badalne par TerminalScreen inhe update karta hai. */
+object TermColors {
+    @Volatile var fg: Int = 0xFFE6E8EE.toInt()
+    @Volatile var bg: Int = 0xFF000000.toInt()
 }

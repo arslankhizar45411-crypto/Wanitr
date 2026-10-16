@@ -44,6 +44,7 @@ fun AppRoot() {
     val app = ctx.applicationContext as WaniApp
     val setup by app.rootfs.state.collectAsState()
     val approval by Approvals.current.collectAsState()
+    val live by LivePages.current.collectAsState()
     var screen by remember { mutableStateOf(Screen.TERMINAL) }
 
     // Pehli dafa app khulne par setup khud shuru ho jata hai
@@ -85,6 +86,7 @@ fun AppRoot() {
             }
         }
 
+        live?.let { LivePageOverlay(it) }
         approval?.let { ApprovalDialog(it) }
     }
 }

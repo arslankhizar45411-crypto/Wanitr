@@ -105,3 +105,36 @@ internal fun BackHeader(
         trailing()
     }
 }
+
+/** Shortcut button: barabar size (weight ke saath), ek hi line mein. */
+@Composable
+internal fun KeyButton(
+    label: String,
+    modifier: Modifier = Modifier,
+    accent: Boolean = false,
+    active: Boolean = false,
+    onClick: () -> Unit
+) {
+    val bg = when {
+        accent -> Accent
+        active -> Accent.copy(alpha = 0.45f)
+        else -> Chip
+    }
+    val fg = if (accent || active) Color.Black else TextMain
+    Box(
+        modifier = modifier
+            .height(36.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = fg,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            fontWeight = if (accent || active) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}

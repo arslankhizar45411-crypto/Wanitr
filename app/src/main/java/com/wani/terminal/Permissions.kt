@@ -3,6 +3,7 @@ package com.wani.terminal
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.Build
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
@@ -14,10 +15,16 @@ import kotlinx.coroutines.flow.asStateFlow
 /** Phone storage (Downloads) ki permission. Activity ke launcher ke zariye mangi jaati hai. */
 object StoragePermission {
 
-    private val perms = arrayOf(
-        Manifest.permission.READ_EXTERNAL_STORAGE,
-        Manifest.permission.WRITE_EXTERNAL_STORAGE
-    )
+    // Android 11+ par sirf READ maangte hain (WRITE legacy hai aur manifest mein 28 tak hi hai).
+    private val perms: Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
+        } else {
+            arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            )
+        }
 
     private var pending: CompletableDeferred<Boolean>? = null
 

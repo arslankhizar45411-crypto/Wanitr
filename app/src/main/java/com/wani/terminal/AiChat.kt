@@ -1,6 +1,8 @@
 package com.wani.terminal
 
 import android.content.Context
+import android.net.Uri
+import android.provider.OpenableColumns
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,17 +18,63 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
+import java.net.URLDecoder
+import java.net.URLEncoder
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 
 enum class Role { USER, ASSISTANT, TOOL, SYSTEM, ERROR }
 
 data class ChatMessage(val role: Role, val text: String)
 
 /**
- * AI assistant. OpenAI-compatible chat API (base URL, model aur key Settings se).
- * Tools:
- *  - run_command: Linux shell (proot) mein command. Approval ke baad (agar auto-approve off ho).
- *  - read_file:   /root/... (Linux) ya /sdcard/... (phone storage, permission ke saath).
+ * Background jobs: lambi command AI ke intezaar ke baghair chalti rahti hai.
+ * AI (ya user) baad mein job_status se result dekh sakta hai.
+ */
+object BackgroundJobs {
+
+    class BgJob(val id: Int, val command: String) {
+        @Volatile var done = false
+        @Volatile var result: CommandResult? = null
+    }
+
+    private val jobs = ConcurrentHashMap<Int, BgJob>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var nextId = 1
+
+    @Synchronized
+    private fun newId(): Int = nextId++
+
+    fun start(context: Context, command: String): Int {
+        val id = newId()
+        val job = BgJob(id, command)
+        jobs[id] = job
+        val appCtx = context.applicationContext
+        scope.launch {
+            job.result = ProotRunner.capture(appCtx, command, timeoutSec = 1800)
+            job.done = true
+        }
+        return id
+    }
+
+    fun status(id: Int): String {
+        val job = jobs[id] ?: return "No background job with id $id."
+        val r = job.result ?: return "Job $id is still running: ${job.command}"
+        val timeout = if (r.timedOut) " (timed out)" else ""
+        return "Job $id finished with exit code ${r.exitCode}$timeout\n" + r.output.takeLast(6000)
+    }
+
+    fun list(): String =
+        if (jobs.isEmpty()) "No background jobs."
+        else jobs.values.sortedBy { it.id }.joinToString("\n") {
+            "#${it.id} ${if (it.done) "done" else "running"}: ${it.command}"
+        }
+}
+
+/**
+ * AI assistant. OpenAI-compatible chat API (base URL, model, key Settings se).
+ * Tools: run_command, start_background_job, job_status, type_in_terminal, write_file,
+ * read_file, open_live_page. Risky tools user ki approval maangte hain (Settings se band ho sakti hai).
  */
 class AiChat(private val context: Context) {
 
@@ -61,11 +109,37 @@ class AiChat(private val context: Context) {
         }
     }
 
+    /** Upload: file ko /root/uploads mein copy karta hai, AI ko uska path deta hai. */
+    fun attachFile(uri: Uri) {
+        scope.launch {
+            try {
+                val name = safeName(displayName(uri))
+                val dir = File(ProotRunner.rootfsDir(context), "root/uploads").apply { mkdirs() }
+                val dest = File(dir, name)
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    dest.outputStream().use { out -> input.copyTo(out) }
+                } ?: throw IllegalStateException("Could not open the selected file.")
+                val linuxPath = "/root/uploads/${dest.name}"
+                append(ChatMessage(Role.SYSTEM, "Uploaded $linuxPath (${dest.length()} bytes)"))
+                history.put(
+                    JSONObject().put("role", "user").put(
+                        "content",
+                        "I uploaded a file to $linuxPath (${dest.length()} bytes). Use read_file or run_command on it when I ask."
+                    )
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                append(ChatMessage(Role.ERROR, "Upload failed: ${e.message}"))
+            }
+        }
+    }
+
     fun stop() {
         job?.cancel()
         job = null
         _busy.value = false
-        append(ChatMessage(Role.SYSTEM, "Stopped."))
+        append(ChatMessage(Role.SYSTEM, "Stopped. Background jobs keep running."))
     }
 
     fun clear() {
@@ -78,8 +152,17 @@ class AiChat(private val context: Context) {
         _messages.update { it + m }
     }
 
+    private fun displayName(uri: Uri): String {
+        val cursor = context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        val name = cursor?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        return name ?: uri.lastPathSegment ?: "upload.bin"
+    }
+
+    private fun safeName(name: String): String =
+        name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "upload.bin" }
+
     private suspend fun runLoop() {
-        if (settings.aiApiKey.isBlank()) {
+        if (settings.aiApiKey.isBlank() && !isLocalBase(settings.aiBaseUrl)) {
             throw IllegalStateException("No API key yet. Open Settings and add your AI API key.")
         }
         for (step in 0 until MAX_STEPS) {
@@ -129,7 +212,9 @@ class AiChat(private val context: Context) {
             conn.readTimeout = 180_000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
-            conn.setRequestProperty("Authorization", "Bearer ${settings.aiApiKey}")
+            if (settings.aiApiKey.isNotBlank()) {
+                conn.setRequestProperty("Authorization", "Bearer ${settings.aiApiKey}")
+            }
             conn.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
 
             val code = conn.responseCode
@@ -155,29 +240,38 @@ class AiChat(private val context: Context) {
     }
 
     private fun toolSpecs(): JSONArray = JSONArray()
-        .put(
-            tool(
-                "run_command",
-                "Run a non-interactive bash command in the Debian Linux environment (root, home /root). Returns exit code and output.",
-                "command",
-                "The bash command to run"
-            )
-        )
-        .put(
-            tool(
-                "read_file",
-                "Read a text file. Linux files: /root/... . Phone Downloads folder: /sdcard/Download/... (asks the user for storage access once).",
-                "path",
-                "Absolute path of the file"
-            )
-        )
+        .put(tool("run_command", "Run a bash command in the Debian Linux environment (root, home /root) and wait for the result. Max 2 minutes. Use for quick commands.",
+            "command" to "The bash command to run"))
+        .put(tool("start_background_job", "Start a long bash command in the background. Returns a job id. Check it later with job_status.",
+            "command" to "The bash command to run in the background"))
+        .put(tool("job_status", "Check a background job by id. Send 'list' as id to list all jobs.",
+            "id" to "Job id number, or 'list'"))
+        .put(tool("type_in_terminal", "Type a command into the visible terminal and press Enter. Its output appears in the terminal, not in this chat.",
+            "text" to "The text to type"))
+        .put(tool("write_file", "Create or overwrite a text file in the Linux environment. Relative paths go to /root.",
+            "path" to "File path, for example /root/hello.sh",
+            "content" to "Full file content"))
+        .put(tool("read_file", "Read a text file. Linux: /root/... . Phone Downloads: /sdcard/Download/... (asks the user for storage access once).",
+            "path" to "Absolute file path"))
+        .put(tool("web_search", "Search the web (DuckDuckGo). Returns titles, URLs and snippets. Use it for current facts and cite the URLs you used.",
+            "query" to "Search query"))
+        .put(tool("web_fetch", "Fetch a web page and return its text (first ~8000 characters).",
+            "url" to "Full http or https URL"))
+        .put(tool("open_live_page", "Show a live page on the phone to ask the user something (choices, a form, a question). Write a complete HTML page. When the user submits, call WaniBridge.submit(string) with the answer; this tool returns that answer. Use plain CSS, no external resources, support dark and light (prefers-color-scheme).",
+            "title" to "Short page title",
+            "html" to "Complete HTML document for the page"))
 
-    private fun tool(name: String, description: String, param: String, paramDesc: String): JSONObject {
-        val props = JSONObject().put(param, JSONObject().put("type", "string").put("description", paramDesc))
-        val params = JSONObject()
+    private fun tool(name: String, description: String, vararg params: Pair<String, String>): JSONObject {
+        val props = JSONObject()
+        val required = JSONArray()
+        for ((p, d) in params) {
+            props.put(p, JSONObject().put("type", "string").put("description", d))
+            required.put(p)
+        }
+        val schema = JSONObject()
             .put("type", "object")
             .put("properties", props)
-            .put("required", JSONArray().put(param))
+            .put("required", required)
         return JSONObject()
             .put("type", "function")
             .put(
@@ -185,30 +279,87 @@ class AiChat(private val context: Context) {
                 JSONObject()
                     .put("name", name)
                     .put("description", description)
-                    .put("parameters", params)
+                    .put("parameters", schema)
             )
     }
 
     private suspend fun execute(name: String, args: JSONObject): String = when (name) {
         "run_command" -> runCommand(args.optString("command"))
+        "start_background_job" -> startJob(args.optString("command"))
+        "job_status" -> jobStatus(args.optString("id").trim())
+        "type_in_terminal" -> typeInTerminal(args.optString("text"))
+        "write_file" -> writeFile(args.optString("path"), args.optString("content"))
         "read_file" -> readFile(args.optString("path"))
+        "web_search" -> webSearch(args.optString("query"))
+        "web_fetch" -> webFetch(args.optString("url"))
+        "open_live_page" -> openLivePage(args.optString("title"), args.optString("html"))
         else -> "Unknown tool: $name"
+    }
+
+    /** Command tools ke liye: pehle Settings check, phir approval (auto-approve on ho to seedha). */
+    private suspend fun allowedToRun(detail: String): String? {
+        if (!settings.aiAllowCommands) {
+            return "Running commands is turned off in Settings. Tell the user to enable it if they want this."
+        }
+        if (settings.aiAutoApprove) return null
+        val approved = Approvals.ask("Allow AI to run this?", detail)
+        return if (approved) null else "The user denied this action. Do not retry it. Ask what they want instead."
     }
 
     private suspend fun runCommand(command: String): String {
         if (command.isBlank()) return "Empty command."
-        if (!settings.aiAllowCommands) {
-            return "Running commands is turned off in Settings. Tell the user to enable it if they want this."
-        }
-        if (!settings.aiAutoApprove) {
-            val approved = Approvals.ask("Allow AI to run this command?", command)
-            if (!approved) return "The user denied this command. Do not retry it. Ask what they want instead."
-        }
+        allowedToRun(command)?.let { return it }
         val result = withContext(Dispatchers.IO) { ProotRunner.capture(context, command) }
         val body = result.output.trimEnd().ifEmpty { "(no output)" }
         append(ChatMessage(Role.TOOL, "\$ $command\n" + body.take(MAX_SHOWN)))
         val timeoutNote = if (result.timedOut) " (timed out after 120 s and was stopped)" else ""
         return "exit code ${result.exitCode}$timeoutNote\n" + result.output.take(MAX_TOOL_OUTPUT)
+    }
+
+    private suspend fun startJob(command: String): String {
+        if (command.isBlank()) return "Empty command."
+        allowedToRun("(background) $command")?.let { return it }
+        val id = BackgroundJobs.start(context, command)
+        append(ChatMessage(Role.TOOL, "started background job #$id: $command"))
+        return "Started background job $id. Check it later with job_status."
+    }
+
+    private fun jobStatus(id: String): String {
+        if (id == "list") return BackgroundJobs.list()
+        val n = id.toIntOrNull() ?: return "Give a numeric job id, or 'list'."
+        return BackgroundJobs.status(n)
+    }
+
+    private suspend fun typeInTerminal(text: String): String {
+        if (text.isBlank()) return "Empty text."
+        allowedToRun("Type into the terminal: $text")?.let { return it }
+        val app = context.applicationContext as WaniApp
+        app.shell.ensureRunning()
+        val pty = app.shell.pty.value
+        app.shell.send(text + if (pty) "\r" else "\n", echo = !pty)
+        append(ChatMessage(Role.TOOL, "typed into terminal: $text"))
+        return "Typed into the terminal. Output shows in the terminal, not here."
+    }
+
+    private suspend fun writeFile(path: String, content: String): String {
+        val cleaned = path.trim()
+        if (cleaned.isEmpty() || cleaned.contains("..")) return "Give a plain file path without '..'."
+        val abs = if (cleaned.startsWith("/")) cleaned else "/root/$cleaned"
+        allowedToRun("Write file $abs (${content.length} chars)")?.let { return it }
+        val file = File(ProotRunner.rootfsDir(context), abs.trimStart('/'))
+        file.parentFile?.mkdirs()
+        file.writeText(content)
+        append(ChatMessage(Role.TOOL, "wrote $abs (${content.length} chars)"))
+        return "Wrote ${content.length} characters to $abs."
+    }
+
+    private suspend fun openLivePage(title: String, html: String): String {
+        if (html.isBlank()) return "Empty page. Write a complete HTML document."
+        val label = title.ifBlank { "Question" }
+        append(ChatMessage(Role.SYSTEM, "Live page opened: $label"))
+        val answer = LivePages.open(label, html)
+        append(ChatMessage(Role.TOOL, "user answer: ${answer.take(400)}"))
+        return "User answered: $answer"
     }
 
     private suspend fun readFile(path: String): String {
@@ -224,7 +375,7 @@ class AiChat(private val context: Context) {
                 )
                 if (!ok) return "The user declined storage access. Do not try again without asking."
                 if (!StoragePermission.request(context)) {
-                    return "Storage permission was not granted. Tell the user to allow it in Android settings or in Wani Terminal Settings."
+                    return "Storage permission was not granted. Tell the user to allow it in Settings."
                 }
             }
             file = File("/storage/emulated/0" + cleaned.removePrefix("/sdcard"))
@@ -248,6 +399,80 @@ class AiChat(private val context: Context) {
         }
     }
 
+    private fun isLocalBase(url: String): Boolean {
+        val u = url.lowercase()
+        return u.contains("localhost") || u.contains("127.0.0.1") || u.contains("10.0.2.2") || u.contains("[::1]")
+    }
+
+    private suspend fun webSearch(query: String): String {
+        if (query.isBlank()) return "Empty query."
+        val url = "https://html.duckduckgo.com/html/?q=" + URLEncoder.encode(query, "UTF-8")
+        val html = withContext(Dispatchers.IO) { httpGet(url) }
+        val results = parseDuckDuckGo(html)
+        append(ChatMessage(Role.TOOL, "web search: $query (${results.size} results)"))
+        return if (results.isEmpty()) {
+            "No results found. The search page may have blocked the request. Try web_fetch on a known URL."
+        } else {
+            results.joinToString("\n\n")
+        }
+    }
+
+    private suspend fun webFetch(url: String): String {
+        val u = url.trim()
+        if (!(u.startsWith("http://") || u.startsWith("https://"))) return "Give a full http or https URL."
+        val raw = withContext(Dispatchers.IO) { httpGet(u) }
+        val text = stripTags(raw.replace(Regex("(?is)<(script|style)[^>]*>.*?</\\1>"), " "))
+        append(ChatMessage(Role.TOOL, "fetched $u"))
+        return text.take(8000).ifBlank { "(empty page)" }
+    }
+
+    private fun httpGet(url: String): String {
+        val conn = URL(url).openConnection() as HttpURLConnection
+        try {
+            conn.requestMethod = "GET"
+            conn.connectTimeout = 15_000
+            conn.readTimeout = 20_000
+            conn.instanceFollowRedirects = true
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 9) WaniTerminal/1.6")
+            conn.setRequestProperty("Accept", "text/html,text/plain;q=0.9,*/*;q=0.5")
+            val code = conn.responseCode
+            if (code !in 200..299) throw IllegalStateException("HTTP $code from $url")
+            return conn.inputStream.bufferedReader().use { it.readText() }.take(300_000)
+        } finally {
+            conn.disconnect()
+        }
+    }
+
+    private fun parseDuckDuckGo(html: String): List<String> {
+        val linkRe = Regex("""<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+        val snipRe = Regex("""<a[^>]*class="result__snippet"[^>]*>(.*?)</a>""", RegexOption.DOT_MATCHES_ALL)
+        val links = linkRe.findAll(html).toList()
+        val snips = snipRe.findAll(html).toList()
+        return links.take(6).mapIndexed { i, m ->
+            val url = unwrapDdg(m.groupValues[1])
+            val title = stripTags(m.groupValues[2])
+            val snip = snips.getOrNull(i)?.let { stripTags(it.groupValues[1]) }.orEmpty()
+            "${i + 1}. $title\n   $url\n   $snip"
+        }
+    }
+
+    /** DuckDuckGo ka redirect link (uddg=...) asli URL mein badalta hai. */
+    private fun unwrapDdg(href: String): String {
+        val full = if (href.startsWith("//")) "https:$href" else href
+        val uddg = Regex("[?&]uddg=([^&]+)").find(full)?.groupValues?.get(1)
+        return if (uddg != null) URLDecoder.decode(uddg, "UTF-8") else full
+    }
+
+    private fun stripTags(s: String): String = s
+        .replace(Regex("<[^>]+>"), "")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
     private fun readHead(file: File): ByteArray {
         val buf = ByteArray(MAX_READ_BYTES)
         var total = 0
@@ -262,30 +487,37 @@ class AiChat(private val context: Context) {
     }
 
     companion object {
-        private const val MAX_STEPS = 12
+        private const val MAX_STEPS = 16
         private const val MAX_SHOWN = 1500
         private const val MAX_TOOL_OUTPUT = 6000
         private const val MAX_READ_BYTES = 40_000
 
         private const val WELCOME =
-            "Hi, I'm Wani AI. I can run commands in your Linux shell and read files from Downloads, " +
-                "with your permission. Add your API key in Settings to start."
+            "Hi, I'm Wani AI. I can run commands, start background jobs, type into the terminal, " +
+                "edit files, read Downloads, and open live pages to ask you things. Add your API key in Settings to start."
 
         private val SYSTEM_PROMPT = """
             You are Wani AI, the built-in assistant of Wani Terminal, an Android app that runs a real Debian Linux shell (arm64, through proot).
             Reply in English. Be brief and clear. Use tools when they help; never guess file contents or command output.
 
             Environment:
-            - Shell: bash as root in the Debian rootfs. Home directory: /root.
-            - Phone storage is mounted at /sdcard. The Downloads folder is /sdcard/Download. Use read_file for it.
+            - Shell: bash as root in the Debian rootfs. Home directory: /root. Uploaded files are in /root/uploads.
+            - Phone storage is mounted at /sdcard. Downloads is /sdcard/Download. Use read_file for it.
+            - Python and other packages are NOT installed by default. Install with apt-get only when the user asks, and say what you will install first.
             - To show an image in the app, run: wani-show FILE.png
-            - Python and other packages are NOT installed by default. Install them with apt-get only when the user asks, and say what you will install first.
+
+            How to work:
+            - Use run_command for quick commands. Use start_background_job for long ones (installs, builds), then job_status to check.
+            - Use write_file to create scripts, then run them (chmod +x for shell scripts).
+            - Use type_in_terminal only when the user wants something visible in the terminal.
+            - When you need a choice or information from the user, use open_live_page with a small HTML form. Its submit button must call WaniBridge.submit(answer). Then continue with the answer.
+            - If a command fails, read the error, fix it and retry. Stop and ask only when you need the user's decision.
 
             Rules:
-            - Say what you are about to create before you create it. Put new command files in /root with a clear name, and make them executable when they are scripts.
+            - Say what you are about to do before risky actions.
             - Never run destructive commands (rm -rf on /, /sdcard or system folders, formatting, reboot) unless the user explicitly asks for that exact action.
             - Never print, copy or send API keys or tokens.
-            - If a command fails, read the error, fix it and retry. Stop and ask only when you need the user's decision.
+            - For current facts, use web_search, then web_fetch the best result. Cite the source URLs.
             - Keep command output short in your replies.
         """.trimIndent()
     }

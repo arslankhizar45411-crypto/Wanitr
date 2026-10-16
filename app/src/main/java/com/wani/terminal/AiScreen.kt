@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -35,17 +36,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
 
 @Composable
 fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
+    val app = LocalContext.current.applicationContext as WaniApp
     val messages by ai.messages.collectAsState()
     val busy by ai.busy.collectAsState()
     var input by remember { mutableStateOf("") }
     val list = rememberLazyListState()
+    val scope = rememberCoroutineScope()
 
     LaunchedEffect(messages.size) {
         if (messages.isNotEmpty()) list.animateScrollToItem(messages.size - 1)
@@ -60,6 +66,9 @@ fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
 
     Column(modifier = Modifier.fillMaxSize().background(Bg)) {
         BackHeader(title = "Wani AI", onBack = onBack) {
+            TextButton(onClick = { switchTheme(app.settings) }) {
+                Text(if (IsDarkTheme) "Light" else "Dark", color = Muted)
+            }
             TextButton(onClick = { ai.clear() }) { Text("Clear", color = Muted) }
             TextButton(onClick = onOpenSettings) { Text("Settings", color = Muted) }
         }
@@ -76,7 +85,7 @@ fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
             }
         }
 
-        // Quick prompts: sirf input bharte hain, bhejte nahi (user check karke bhejta hai)
+        // Quick prompts: sirf input bharte hain, bhejte nahi
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -85,16 +94,16 @@ fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Suggestion("Create a command file") {
-                input = "Create a command file named hello.sh in /root that prints a greeting, then run it."
+                input = "Create /root/hello.sh that prints a greeting, make it executable, and run it."
             }
             Suggestion("Explain Downloads/doc.txt") {
                 input = "Read /sdcard/Download/doc.txt and explain what it says."
             }
+            Suggestion("Ask me with a page") {
+                input = "Ask me with a live page which Debian packages I want, then install them in the background."
+            }
             Suggestion("System info") {
                 input = "Show the Debian version, CPU info and free disk space."
-            }
-            Suggestion("Install Python") {
-                input = "Install python3 with apt-get. Tell me what you will install before you start."
             }
         }
 
@@ -105,6 +114,13 @@ fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
                 .padding(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            OutlinedButton(
+                onClick = { scope.launch { FilePicker.pick()?.let { ai.attachFile(it) } } },
+                enabled = !busy
+            ) {
+                Text("Upload", fontSize = 12.sp)
+            }
+            Spacer(Modifier.width(6.dp))
             OutlinedTextField(
                 value = input,
                 onValueChange = { input = it },
@@ -124,7 +140,7 @@ fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
                 Button(
                     onClick = { submit() },
                     colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
-                ) { Text("Send", fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) }
+                ) { Text("Send", fontWeight = FontWeight.Bold) }
             }
         }
     }

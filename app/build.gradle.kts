@@ -42,8 +42,8 @@ android {
         minSdk = 26
         // Android 10+ app data se binaries chalane ki restriction ki wajah se 28 rakha gaya hai (Termux bhi yahi karta hai)
         targetSdk = 28
-        versionCode = 9
-        versionName = "1.6.2"
+        versionCode = 10
+        versionName = "1.6.3"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }

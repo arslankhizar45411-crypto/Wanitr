@@ -35,6 +35,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -154,6 +155,12 @@ fun TerminalScreen(
 
     // Theme badle to terminal ke purane rang bhi naye ho jayen
     LaunchedEffect(IsDarkTheme) { shell.refreshTheme() }
+
+    // Terminal khuli hai to hi screen render hoti hai
+    DisposableEffect(Unit) {
+        shell.setViewing(true)
+        onDispose { shell.setViewing(false) }
+    }
 
     fun showKeyboard() {
         focusRequester.requestFocus()

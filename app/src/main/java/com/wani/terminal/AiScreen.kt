@@ -42,6 +42,7 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 @Composable
@@ -49,6 +50,15 @@ fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
     val app = LocalContext.current.applicationContext as WaniApp
     val messages by ai.messages.collectAsState()
     val busy by ai.busy.collectAsState()
+    val status by ai.status.collectAsState()
+    var elapsed by remember { mutableStateOf(0) }
+    LaunchedEffect(busy) {
+        elapsed = 0
+        while (ai.busy.value) {
+            delay(1000)
+            elapsed++
+        }
+    }
     var input by remember { mutableStateOf("") }
     val list = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -81,7 +91,15 @@ fun AiScreen(ai: AiChat, onBack: () -> Unit, onOpenSettings: () -> Unit) {
         ) {
             items(messages) { m -> ChatBubble(m) }
             if (busy) {
-                item { Text("Working…", color = Muted, fontSize = 12.sp) }
+                item {
+                    Column {
+                        Text("Working… ${elapsed}s", color = Accent, fontSize = 12.sp)
+                        if (status.isNotBlank()) Text(status, color = Muted, fontSize = 12.sp)
+                        if (elapsed >= 45) {
+                            Text("The model is slow right now. Wait a bit, or press Stop.", color = Amber, fontSize = 12.sp)
+                        }
+                    }
+                }
             }
         }
 

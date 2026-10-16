@@ -45,6 +45,7 @@ class ShellSession(private val context: Context) {
     @Volatile private var out: OutputStream? = null
     @Volatile private var cols = 80
     @Volatile private var rows = 24
+    @Volatile private var viewing = false
     private var bannerShown = false
 
     private val _text = MutableStateFlow(AnnotatedString(""))
@@ -68,8 +69,11 @@ class ShellSession(private val context: Context) {
         // UI ko 40ms mein ek hi dafa update karo, taake tez output par app na atke
         scope.launch {
             for (ignored in dirty) {
-                _text.value = buffer.snapshot()
-                _alt.value = buffer.isAltScreen()
+                // Terminal khuli na ho to render nahi karte: AI screen par CPU aur lag bachta hai
+                if (viewing) {
+                    _text.value = buffer.snapshot(MAX_RENDER_ROWS)
+                    _alt.value = buffer.isAltScreen()
+                }
                 delay(RENDER_INTERVAL_MS)
             }
         }
@@ -107,6 +111,12 @@ class ShellSession(private val context: Context) {
     }
 
     /** Theme badalne par output dobara banao, taake naye rang lagein. */
+    /** TerminalScreen khuli ho to true. Band ho to render pause. */
+    fun setViewing(v: Boolean) {
+        viewing = v
+        if (v) dirty.trySend(Unit)
+    }
+
     fun refreshTheme() {
         dirty.trySend(Unit)
     }
@@ -260,7 +270,8 @@ class ShellSession(private val context: Context) {
     }
 
     companion object {
-        private const val RENDER_INTERVAL_MS = 40L
+        private const val RENDER_INTERVAL_MS = 120L
+        private const val MAX_RENDER_ROWS = 600
 
         private val ART = """
             | __        ___    _   _ ___

@@ -63,8 +63,8 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             SectionTitle("AI assistant")
-            SettingField("API base URL", baseUrl, { baseUrl = it; saved = false }, "https://api.openai.com/v1")
-            SettingField("Model", model, { model = it; saved = false }, "gpt-4o-mini")
+            SettingField("API base URL", baseUrl, { baseUrl = it; saved = false }, "https://openrouter.ai/api/v1")
+            SettingField("Model", model, { model = it; saved = false }, "openrouter/free")
             SettingField("API key", apiKey, { apiKey = it; saved = false }, "paste your key", secret = true)
             Text(
                 "Works with any OpenAI-compatible API. Local server on this phone: http://127.0.0.1:PORT/v1 (key can be empty). The key is stored only on this phone.",

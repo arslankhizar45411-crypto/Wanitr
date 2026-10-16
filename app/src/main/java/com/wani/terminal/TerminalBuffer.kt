@@ -98,9 +98,12 @@ class TerminalBuffer(maxChars: Int) {
     fun isAltScreen(): Boolean = onAlt
 
     @Synchronized
-    fun snapshot(): AnnotatedString = buildAnnotatedString {
+    fun snapshot(maxRows: Int = Int.MAX_VALUE): AnnotatedString = buildAnnotatedString {
         if (!onAlt) {
-            for (row in scrollback) appendRow(this, row, -1)
+            // Sirf aakhri lines: lambi history ka render UI ko slow karta hai
+            val room = (maxRows - rows).coerceAtLeast(0)
+            val start = (scrollback.size - room).coerceAtLeast(0)
+            for (i in start until scrollback.size) appendRow(this, scrollback[i], -1)
         }
         for (r in 0 until rows) {
             appendRow(this, screen[r], if (cursorVisible && r == curRow) curCol else -1)

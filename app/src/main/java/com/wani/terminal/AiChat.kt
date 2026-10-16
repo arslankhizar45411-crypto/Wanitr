@@ -6,6 +6,7 @@ import android.provider.OpenableColumns
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -17,6 +18,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URLDecoder
 import java.net.URLEncoder
@@ -87,6 +89,10 @@ class AiChat(private val context: Context) {
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
+    /** Abhi AI kya kar raha hai (screen par dikhta hai). */
+    private val _status = MutableStateFlow("")
+    val status: StateFlow<String> = _status.asStateFlow()
+
     private var history = JSONArray()
     private var job: Job? = null
 
@@ -96,6 +102,7 @@ class AiChat(private val context: Context) {
         append(ChatMessage(Role.USER, text))
         history.put(JSONObject().put("role", "user").put("content", text))
         _busy.value = true
+        _status.value = "Starting…"
         job = scope.launch {
             try {
                 runLoop()
@@ -105,6 +112,7 @@ class AiChat(private val context: Context) {
                 append(ChatMessage(Role.ERROR, e.message ?: e.toString()))
             } finally {
                 _busy.value = false
+                _status.value = ""
             }
         }
     }
@@ -139,6 +147,7 @@ class AiChat(private val context: Context) {
         job?.cancel()
         job = null
         _busy.value = false
+        _status.value = ""
         append(ChatMessage(Role.SYSTEM, "Stopped. Background jobs keep running."))
     }
 
@@ -166,7 +175,7 @@ class AiChat(private val context: Context) {
             throw IllegalStateException("No API key yet. Open Settings and add your AI API key.")
         }
         for (step in 0 until MAX_STEPS) {
-            val message = requestCompletion()
+            val message = requestWithRetry(step)
             val content = if (message.isNull("content")) "" else message.optString("content")
             val calls = message.optJSONArray("tool_calls")
 
@@ -185,6 +194,7 @@ class AiChat(private val context: Context) {
                 val fn = call.getJSONObject("function")
                 val args = runCatching { JSONObject(fn.optString("arguments", "{}")) }
                     .getOrElse { JSONObject() }
+                _status.value = statusFor(fn.optString("name"), args)
                 val result = execute(fn.optString("name"), args)
                 history.put(
                     JSONObject()
@@ -195,6 +205,44 @@ class AiChat(private val context: Context) {
             }
         }
         append(ChatMessage(Role.SYSTEM, "Paused after $MAX_STEPS steps. Send a message to continue."))
+    }
+
+    /** Model ko request bhejta hai. Network ya server (429/5xx) ka masla ho to 3 dafa tak try karta hai. */
+    private suspend fun requestWithRetry(step: Int): JSONObject {
+        var lastError: Exception? = null
+        for (attempt in 1..3) {
+            _status.value = if (attempt == 1) {
+                "Thinking (step ${step + 1}/$MAX_STEPS)…"
+            } else {
+                "Network problem, retrying ($attempt/3)…"
+            }
+            try {
+                return withContext(Dispatchers.IO) { requestCompletion() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: IOException) {
+                lastError = e
+            } catch (e: IllegalStateException) {
+                val retryable = Regex("AI API error (429|5\\d\\d)").containsMatchIn(e.message.orEmpty())
+                if (!retryable) throw e
+                lastError = e
+            }
+            delay(2000L * attempt)
+        }
+        throw lastError ?: IllegalStateException("AI request failed")
+    }
+
+    /** Status line ke liye: tool kya kar raha hai. */
+    private fun statusFor(name: String, args: JSONObject): String = when (name) {
+        "run_command", "start_background_job" -> "Running: " + args.optString("command").take(70)
+        "type_in_terminal" -> "Typing into the terminal…"
+        "write_file" -> "Writing: " + args.optString("path").take(60)
+        "read_file" -> "Reading: " + args.optString("path").take(60)
+        "web_search" -> "Searching the web…"
+        "web_fetch" -> "Fetching a web page…"
+        "open_live_page" -> "Waiting for your answer on the page…"
+        "job_status" -> "Checking a background job…"
+        else -> "Running tool: $name"
     }
 
     private fun requestCompletion(): JSONObject {
@@ -209,7 +257,7 @@ class AiChat(private val context: Context) {
         try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 20_000
-            conn.readTimeout = 180_000
+            conn.readTimeout = 120_000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             if (settings.aiApiKey.isNotBlank()) {

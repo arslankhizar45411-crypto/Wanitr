@@ -72,6 +72,6 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val FONT_SCALE = 0.7f
+        private const val FONT_SCALE = 0.77f
     }
 }

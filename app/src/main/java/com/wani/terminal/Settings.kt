@@ -13,7 +13,7 @@ class AppSettings(context: Context) {
     var aiBaseUrl: String
         get() = prefs.getString(K_BASE_URL, DEFAULT_BASE_URL) ?: DEFAULT_BASE_URL
         set(value) {
-            prefs.edit().putString(K_BASE_URL, value.trim().trimEnd('/')).apply()
+            prefs.edit().putString(K_BASE_URL, value.trim().trimEnd('/').removeSuffix("/chat/completions").trimEnd('/')).apply()
         }
 
     var aiModel: String
@@ -74,11 +74,11 @@ class AppSettings(context: Context) {
         }
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://api.openai.com/v1"
-        const val DEFAULT_MODEL = "gpt-4o-mini"
+        const val DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+        const val DEFAULT_MODEL = "openrouter/free"
 
-        private const val K_BASE_URL = "ai_base_url"
-        private const val K_MODEL = "ai_model"
+        private const val K_BASE_URL = "ai_base_url_v2"
+        private const val K_MODEL = "ai_model_v2"
         private const val K_API_KEY = "ai_api_key"
         private const val K_ALLOW_COMMANDS = "ai_allow_commands"
         private const val K_AUTO_APPROVE = "ai_auto_approve"

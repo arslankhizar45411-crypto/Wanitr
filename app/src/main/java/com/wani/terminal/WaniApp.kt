@@ -13,8 +13,13 @@ class WaniApp : Application() {
     lateinit var rootfs: RootfsManager
         private set
 
-    lateinit var shell: ShellSession
+    /** Sab terminal sessions (tabs). */
+    lateinit var sessions: SessionManager
         private set
+
+    /** Abhi dikhne wala shell. AI tools isi ko use karte hain. */
+    val shell: ShellSession
+        get() = sessions.current
 
     lateinit var settings: AppSettings
         private set
@@ -27,7 +32,7 @@ class WaniApp : Application() {
         settings = AppSettings(this)
         applyTheme(settings.darkTheme)
         rootfs = RootfsManager(this)
-        shell = ShellSession(this)
+        sessions = SessionManager(this)
         ai = AiChat(this)
     }
 }

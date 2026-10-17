@@ -22,6 +22,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -57,14 +58,23 @@ fun AppRoot() {
     Box(modifier = Modifier.fillMaxSize()) {
         if (setup == SetupState.Ready) {
             when (screen) {
-                Screen.TERMINAL -> TerminalScreen(
-                    shell = app.shell,
-                    onNavigate = { screen = it },
-                    onAskAi = { prompt ->
-                        if (prompt.isNotEmpty()) app.ai.send(prompt)
-                        screen = Screen.AI
+                Screen.TERMINAL -> {
+                    val sessionList by app.sessions.list.collectAsState()
+                    val sessionIndex by app.sessions.index.collectAsState()
+                    val current = sessionList[sessionIndex.coerceIn(0, sessionList.lastIndex)]
+                    // Session badle to poora terminal naye sire se bane (naye shell ke saath)
+                    key(current.id) {
+                        TerminalScreen(
+                            shell = current,
+                            sessions = app.sessions,
+                            onNavigate = { screen = it },
+                            onAskAi = { prompt ->
+                                if (prompt.isNotEmpty()) app.ai.send(prompt)
+                                screen = Screen.AI
+                            }
+                        )
                     }
-                )
+                }
                 Screen.AI -> AiScreen(
                     ai = app.ai,
                     onBack = { screen = Screen.TERMINAL },

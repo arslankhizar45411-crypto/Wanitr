@@ -8,15 +8,18 @@ import androidx.compose.ui.text.AnnotatedString
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import java.io.File
 import java.io.IOException
 import java.io.OutputStream
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 /** Terminal mein aayi hui inline image (wani-show ya OSC 1337 se). */
 class TermImage(
@@ -31,6 +34,9 @@ class TermImage(
  * to asli PTY milti hai: nano, vim, top, colors, Ctrl+C, Tab, history sab chalte hain.
  */
 class ShellSession(private val context: Context) {
+
+    /** Session ki pehchaan (Compose key ke liye). */
+    val id: Int = nextSessionId.getAndIncrement()
 
     private class Outgoing(val data: String, val echo: Boolean)
 
@@ -83,10 +89,56 @@ class ShellSession(private val context: Context) {
         }
     }
 
-    /** Terminal ka size (characters mein). Agli dafa shell start hone par lagu hota hai. */
-    fun setSize(newCols: Int, newRows: Int) {
-        cols = newCols.coerceIn(20, 300)
-        rows = newRows.coerceIn(5, 100)
+    /**
+     * Terminal ka size badalta hai (keyboard khulna, rotation). Buffer ka grid bhi badalta hai
+     * aur chal rahi shell ki PTY ka size bhi (nano/htop naye size par redraw hote hain).
+     */
+    fun resize(newCols: Int, newRows: Int) {
+        val c = newCols.coerceIn(20, 300)
+        val r = newRows.coerceIn(5, 100)
+        if (c == cols && r == rows) return
+        cols = c
+        rows = r
+        buffer.resize(c, r)
+        dirty.trySend(Unit)
+        if (_pty.value && _running.value) {
+            scope.launch { applyPtySize(c, r) }
+        }
+    }
+
+    /** Shell ka tty path (startInternal mein /tmp/wani-tty mein likha jata hai). */
+    private fun ttyPath(): String? {
+        val f = File(ProotRunner.rootfsDir(context), "tmp/wani-tty")
+        val path = runCatching { f.readText().trim() }.getOrNull() ?: return null
+        return path.takeIf { Regex("/dev/[A-Za-z0-9/_.-]+").matches(it) }
+    }
+
+    /** PTY ka window size set karta hai. Ye kernel ko SIGWINCH bhejta hai, to apps khud redraw karte hain. */
+    private suspend fun applyPtySize(c: Int, r: Int) {
+        val tty = ttyPath() ?: return
+        runCatching {
+            ProotRunner.capture(context, "stty -F '$tty' cols $c rows $r 2>/dev/null", timeoutSec = 10)
+        }
+    }
+
+    /** Arrow / Home / End jaisi keys: app ke mode (DECCKM) ke hisaab se sahi sequence. */
+    fun sendKey(normal: String, application: String? = null) {
+        val seq = if (application != null && buffer.appCursorKeys()) application else normal
+        send(seq)
+    }
+
+    /**
+     * Clipboard ka text shell ko bhejta hai. Bracketed paste on ho to poora text ek saath
+     * jaata hai, taake multi-line paste har line par alag command na chalaye.
+     */
+    fun paste(text: String) {
+        if (text.isEmpty()) return
+        val body = text.replace("\r\n", "\n").replace('\n', '\r')
+        if (_pty.value && buffer.bracketedPasteMode()) {
+            send("\u001B[200~$body\u001B[201~")
+        } else {
+            send(body, echo = !_pty.value)
+        }
     }
 
     /** Shell chalu karta hai. Agar pehle se chal raha ho to kuch nahi karta. */
@@ -139,6 +191,25 @@ class ShellSession(private val context: Context) {
         scope.launch { stopInternal() }
     }
 
+    /** Session hamesha ke liye band: shell rok kar coroutines bhi khatam. */
+    fun dispose() {
+        scope.launch {
+            stopInternal()
+            delay(2000)
+            scope.cancel()
+        }
+    }
+
+    /** Screen par abhi jo text hai, aakhri [lines] lines (AI ke tool ke liye). */
+    fun recentText(lines: Int = 60): String = buffer.snapshot(lines.coerceIn(5, 300)).text
+
+    /** AI ke command aur output ko terminal mein rang ke saath dikhata hai. */
+    fun logAi(text: String) {
+        val clean = text.replace("\u001B", "").replace("\r", "").take(4000)
+        val body = clean.lines().joinToString("\r\n") { "\u001B[36m$it\u001B[0m" }
+        appendRaw("\r\n$body\r\n")
+    }
+
     private fun addImage(bytes: ByteArray, name: String) {
         val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
         if (bmp == null) {
@@ -178,10 +249,12 @@ class ShellSession(private val context: Context) {
         // Grid ko current size par set karo (pichla screen clear hota hai, scrollback rehta hai)
         buffer.resetGrid(cols, rows)
 
+        // Shell apna tty path /tmp/wani-tty mein likhti hai, taake resize par stty use ho sake
+        File(ProotRunner.rootfsDir(context), "tmp/wani-tty").delete()
         val args = if (usePty) {
             listOf(
                 "script", "-qfc",
-                "stty cols $cols rows $rows 2>/dev/null; exec ${Config.SHELL} -i",
+                "tty > /tmp/wani-tty 2>/dev/null; stty cols $cols rows $rows 2>/dev/null; exec ${Config.SHELL} -i",
                 "/dev/null"
             )
         } else {
@@ -270,6 +343,7 @@ class ShellSession(private val context: Context) {
     }
 
     companion object {
+        private val nextSessionId = AtomicInteger(1)
         private const val RENDER_INTERVAL_MS = 120L
         private const val MAX_RENDER_ROWS = 600
 
@@ -283,9 +357,9 @@ class ShellSession(private val context: Context) {
 
         private val BANNER =
             "\u001B[32m" + ART + "\u001B[0m\r\n\r\n" +
-                "Welcome to Wani Terminal v1.6\r\n" +
+                "Welcome to Wani Terminal v2.0\r\n" +
                 "Tap the screen to type. Keys go straight to the shell.\r\n" +
-                "AI: tap AI, or type @ai <question> in the shell.\r\n" +
+                "AI: tap AI, use the AI cell button, or type @ai <question>.\r\n" +
                 "Setup: run wani-setup-storage to link Downloads.\r\n\r\n"
     }
 }

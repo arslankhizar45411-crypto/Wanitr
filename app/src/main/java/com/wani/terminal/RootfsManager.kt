@@ -130,22 +130,38 @@ class RootfsManager(context: Context) {
         }
     }
 
+    /**
+     * Download, resume ke saath. Agar pichhli dafa adhoori file (rootfs.tar.xz.part) pari ho,
+     * to HTTP Range se wahin se shuru karta hai (network drop par dobara sab kuch nahi bharta).
+     */
     private suspend fun download() {
+        val resumeFrom = if (partial.isFile) partial.length() else 0L
         val conn = URL(Config.ROOTFS_URL).openConnection() as HttpURLConnection
         try {
             conn.connectTimeout = 15_000
             conn.readTimeout = 30_000
             conn.instanceFollowRedirects = true
+            if (resumeFrom > 0) conn.setRequestProperty("Range", "bytes=$resumeFrom-")
             conn.connect()
-            if (conn.responseCode !in 200..299) {
-                throw IOException("HTTP ${conn.responseCode}")
+            val code = conn.responseCode
+            if (code == 416) {
+                // Adhoora hissa server ke hisab se galat hai: sirf wohi hissa mita kar dobara
+                partial.delete()
+                throw IOException("Partial download was invalid and was removed. Tap Retry.")
             }
-            val total = conn.contentLengthLong
-            var done = 0L
-            _state.value = SetupState.Downloading(0L, total)
+            if (code !in 200..299) {
+                throw IOException("HTTP $code")
+            }
+            // 206 = server ne resume maana. 200 = poori file dobara (purani partial hatao)
+            val resumed = code == 206 && resumeFrom > 0
+            val start = if (resumed) resumeFrom else 0L
+            val remaining = conn.contentLengthLong
+            val total = if (remaining > 0) start + remaining else -1L
+            var done = start
+            _state.value = SetupState.Downloading(done, total)
 
             conn.inputStream.use { input ->
-                FileOutputStream(partial).use { out ->
+                FileOutputStream(partial, resumed).use { out ->
                     val buf = ByteArray(64 * 1024)
                     while (true) {
                         currentCoroutineContext().ensureActive()
@@ -157,6 +173,9 @@ class RootfsManager(context: Context) {
                     }
                 }
             }
+            if (total > 0 && done < total) {
+                throw IOException("Connection stopped at ${mb(done)} of ${mb(total)} MB. Tap Retry to continue.")
+            }
             archive.delete()
             if (!partial.renameTo(archive)) {
                 throw IOException("Could not rename the downloaded file")
@@ -165,6 +184,8 @@ class RootfsManager(context: Context) {
             conn.disconnect()
         }
     }
+
+    private fun mb(bytes: Long): String = "%.1f".format(bytes / 1048576.0)
 
     private fun verifyArchive(): Boolean {
         val digest = MessageDigest.getInstance("SHA-256")

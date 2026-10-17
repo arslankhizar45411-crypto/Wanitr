@@ -43,6 +43,10 @@ class TerminalBuffer(maxChars: Int) {
     private var bottom = rows - 1
     private var autoWrap = true
     private var cursorVisible = true
+    /** DECCKM (?1): nano, vim, htop arrow keys ESC O x maangte hain. */
+    private var appCursor = false
+    /** Bracketed paste (?2004): paste ko shell ek saath padhta hai. */
+    private var bracketedPaste = false
 
     private var onAlt = false
     private var savedPrimary: Array<Array<Cell>>? = null
@@ -92,7 +96,52 @@ class TerminalBuffer(maxChars: Int) {
         mode = Mode.TEXT
         autoWrap = true
         cursorVisible = true
+        appCursor = false
+        bracketedPaste = false
     }
+
+    /**
+     * Screen ka size badalta hai (keyboard khulna/band hona, rotation). Content bachta hai:
+     * jo lines upar se nikalti hain wo scrollback mein jati hain (sirf main screen par).
+     */
+    @Synchronized
+    fun resize(newCols: Int, newRows: Int) {
+        val nc = newCols.coerceIn(20, 300)
+        val nr = newRows.coerceIn(5, 100)
+        if (nc == cols && nr == rows) return
+        val oldGrid = screen
+        val oldCols = cols
+        val oldRows = rows
+        val drop = if (curRow >= nr) curRow - nr + 1 else 0
+        if (!onAlt) for (r in 0 until drop) pushScrollback(oldGrid[r])
+        cols = nc
+        rows = nr
+        screen = copyGrid(oldGrid, oldRows, oldCols, drop, nr, nc)
+        savedPrimary = savedPrimary?.let { copyGrid(it, oldRows, oldCols, 0, nr, nc) }
+        curRow = (curRow - drop).coerceIn(0, nr - 1)
+        curCol = curCol.coerceIn(0, nc - 1)
+        pendingWrap = false
+        top = 0
+        bottom = nr - 1
+    }
+
+    private fun copyGrid(src: Array<Array<Cell>>, srcRows: Int, srcCols: Int, startRow: Int, nr: Int, nc: Int): Array<Array<Cell>> {
+        val grid = newGrid(nr, nc)
+        for (r in 0 until nr) {
+            val sr = r + startRow
+            if (sr < 0 || sr >= srcRows) continue
+            for (c in 0 until minOf(nc, srcCols)) grid[r][c] = src[sr][c]
+        }
+        return grid
+    }
+
+    /** Arrow keys ka mode: true ho to ESC O A waghera bhejo, warna ESC [ A. */
+    @Synchronized
+    fun appCursorKeys(): Boolean = appCursor
+
+    /** true ho to paste ko ESC[200~ ... ESC[201~ mein lapeto. */
+    @Synchronized
+    fun bracketedPasteMode(): Boolean = bracketedPaste
 
     @Synchronized
     fun isAltScreen(): Boolean = onAlt
@@ -263,6 +312,12 @@ class TerminalBuffer(maxChars: Int) {
                 1049, 1047, 47 -> {
                     if (on) enterAlt() else leaveAlt()
                 }
+                1 -> {
+                    appCursor = on
+                }
+                2004 -> {
+                    bracketedPaste = on
+                }
                 7 -> {
                     autoWrap = on
                 }
@@ -391,7 +446,7 @@ class TerminalBuffer(maxChars: Int) {
         val row = screen[curRow]
         val from = if (how == 1 || how == 2) 0 else curCol
         val to = if (how == 0 || how == 2) cols - 1 else curCol
-        for (i in from..to) row[i] = BLANK
+        for (i in from..to) row[i] = erased()
     }
 
     private fun eraseDisplay(how: Int) {
@@ -448,7 +503,7 @@ class TerminalBuffer(maxChars: Int) {
     private fun eraseChars(n: Int) {
         val row = screen[curRow]
         val end = minOf(cols, curCol + n.coerceAtLeast(1))
-        for (i in curCol until end) row[i] = BLANK
+        for (i in curCol until end) row[i] = erased()
     }
 
     private fun saveCursor() {
@@ -569,7 +624,10 @@ class TerminalBuffer(maxChars: Int) {
 
     private fun newGrid(r: Int, c: Int): Array<Array<Cell>> = Array(r) { Array(c) { BLANK } }
 
-    private fun blankRow(): Array<Cell> = Array(cols) { BLANK }
+    private fun blankRow(): Array<Cell> = Array(cols) { erased() }
+
+    /** Erase ke waqt cell ka rang: current background (BCE), foreground/style nahi. */
+    private fun erased(): Cell = if (style.bg == 0) BLANK else Cell(' ', 0, style.bg, false, false, false)
 
     private fun palette256(n: Int): Int = when (n) {
         in 0..15 -> ANSI16[n]

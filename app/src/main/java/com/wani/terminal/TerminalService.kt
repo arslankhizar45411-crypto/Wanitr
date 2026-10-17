@@ -25,7 +25,7 @@ class TerminalService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val app = application as WaniApp
         if (intent?.action == ACTION_STOP) {
-            app.shell.shutdown()
+            app.sessions.shutdownAll()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -41,7 +41,7 @@ class TerminalService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onDestroy() {
-        (application as WaniApp).shell.shutdown()
+        (application as WaniApp).sessions.shutdownAll()
         super.onDestroy()
     }
 
@@ -60,7 +60,7 @@ class TerminalService : Service() {
         )
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("Wani Terminal")
-            .setContentText("Linux shell is running in the background")
+            .setContentText("Linux shell and AI are running in the background")
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(open)
             .addAction(android.R.drawable.ic_menu_close_clear_cancel, "Exit", stop)

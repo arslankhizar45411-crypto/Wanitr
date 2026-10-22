@@ -1,6 +1,8 @@
 package com.collabcode.app.model
 
 import android.app.Application
+import android.net.Uri
+import android.provider.OpenableColumns
 import android.content.Intent
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -34,7 +36,6 @@ enum class EditStatus { Pending, Accepted, Rejected }
 data class PendingEdit(val file: String, val newContent: String, val diff: List<DiffLine>)
 data class BuildRun(val id: Long, val number: Int, val status: String, val url: String)
 
-const val DEFAULT_PROMPT = "Add a multiply function to utils.kt"
 
 sealed interface ChatItem
 class UserMsg(val text: String) : ChatItem
@@ -64,6 +65,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
     val openFiles = mutableStateListOf<String>()
     val files = mutableStateMapOf<String, String>()
     val chat = mutableStateListOf<ChatItem>()
+    val attachments = mutableStateListOf<Attachment>()
     val builds = mutableStateListOf<BuildRun>()
 
     var onboarded by mutableStateOf(prefs.isSetUp)
@@ -191,7 +193,10 @@ class AppState(application: Application) : AndroidViewModel(application) {
                 else -> null
             }
         }
-        chat.add(UserMsg(prompt))
+        val att = attachments.toList()
+        val fullPrompt = if (att.isEmpty()) prompt else prompt + "\n\n" + att.joinToString("\n\n") { describe(it) }
+        chat.add(UserMsg(if (att.isEmpty()) prompt else prompt + "\n\nAttached: " + att.joinToString { it.name }))
+        attachments.clear()
         if (prefs.aiKey.isNullOrBlank()) {
             chat.add(NoticeMsg("ai", "not connected", "Add an AI key in Settings first."))
             return
@@ -199,7 +204,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
         busy = true
         try {
             val client = AiClient(prefs.aiBaseUrl, prefs.aiKey.orEmpty(), prefs.aiModel)
-            val result = client.ask(prompt, files.toMap(), history)
+            val result = client.ask(fullPrompt, files.toMap(), history)
             val edits = result.edits.mapNotNull { (name, content) ->
                 val old = files[name] ?: return@mapNotNull null
                 if (old == content) null else PendingEdit(name, content, lineDiff(old, content))
@@ -220,6 +225,45 @@ class AppState(application: Application) : AndroidViewModel(application) {
             busy = false
             chatStore.save(chat.toList())
         }
+    }
+
+    /** Reads the picked files. Text files are read (first 200 KB); other files keep only name, type and size. */
+    fun addAttachments(uris: List<Uri>) {
+        viewModelScope.launch {
+            for (uri in uris) {
+                if (attachments.size >= MAX_ATTACHMENTS) break
+                val item = withContext(Dispatchers.IO) { readAttachment(uri) }
+                if (item != null) attachments.add(item)
+            }
+        }
+    }
+
+    fun removeAttachment(item: Attachment) {
+        attachments.remove(item)
+    }
+
+    private fun readAttachment(uri: Uri): Attachment? {
+        val resolver = getApplication<Application>().contentResolver
+        var name = uri.lastPathSegment ?: "file"
+        var size = -1L
+        resolver.query(uri, null, null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                if (ni >= 0) name = c.getString(ni) ?: name
+                val si = c.getColumnIndex(OpenableColumns.SIZE)
+                if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+            }
+        }
+        val mime = resolver.getType(uri) ?: "application/octet-stream"
+        val isText = mime.startsWith("text/") || mime == "application/json" ||
+            mime == "application/xml" || TEXT_EXTENSIONS.any { name.endsWith(it) }
+        val text = if (isText) {
+            resolver.openInputStream(uri)?.use { readLimited(it, TEXT_LIMIT) }
+        } else {
+            null
+        }
+        val bytes = if (size >= 0) size else (text?.toByteArray(Charsets.UTF_8)?.size?.toLong() ?: 0L)
+        return Attachment(name, mime, bytes, text)
     }
 
     fun accept(msg: AssistantMsg) {
@@ -514,27 +558,35 @@ class AppState(application: Application) : AndroidViewModel(application) {
     }
 }
 
-private fun defaultFiles(): Map<String, String> = linkedMapOf(
-    "main.kt" to MAIN_KT,
-    "utils.kt" to UTILS_KT,
-    "index.html" to INDEX_HTML,
-    "README.md" to README_MD,
+data class Attachment(val name: String, val mime: String, val size: Long, val text: String?)
+
+private const val MAX_ATTACHMENTS = 5
+private const val TEXT_LIMIT = 200_000
+private val TEXT_EXTENSIONS = listOf(
+    ".kt", ".java", ".md", ".txt", ".json", ".xml", ".html", ".gradle", ".kts",
+    ".py", ".js", ".css", ".yml", ".yaml", ".sh",
 )
 
-private val MAIN_KT =
-    "// Entry point\npackage com.example.sample\n\nfun main() {\n" +
-    "    val name = \"CollabCode\"\n" +
-    "    println(\"Hello, \$name\")\n" +
-    "    val n = 16\n" +
-    "    println(\"sqrt = \${Math.sqrt(n.toDouble())}\")\n" +
-    "}\n"
+/** A new project starts with an empty main.kt. No demo files. */
+private fun defaultFiles(): Map<String, String> = linkedMapOf("main.kt" to EMPTY_MAIN)
 
-private const val UTILS_KT = "fun add(a: Int, b: Int): Int = a + b\n"
+private const val EMPTY_MAIN = "fun main() {\n}\n"
 
-private const val INDEX_HTML =
-    "<!doctype html><html><body style=\"font-family:sans-serif;padding:20px\">" +
-    "<h1>Hello from CollabCode</h1>" +
-    "<button onclick=\"this.textContent='Tapped!'\">Tap me</button>" +
-    "</body></html>\n"
+private fun describe(a: Attachment): String {
+    val head = "ATTACHED FILE: ${a.name} (type ${a.mime}, ${a.size} bytes)"
+    val body = a.text?.let { "\n<<<\n$it\n>>>" } ?: "\n(Binary file. Only its name, type and size are included.)"
+    return head + body
+}
 
-private const val README_MD = "# CollabCode Sample\n\nA small project for testing the UI.\n"
+private fun readLimited(input: java.io.InputStream, limit: Int): String {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(8192)
+    var total = 0
+    while (total < limit) {
+        val n = input.read(buf, 0, minOf(buf.size, limit - total))
+        if (n < 0) break
+        out.write(buf, 0, n)
+        total += n
+    }
+    return out.toString("UTF-8")
+}

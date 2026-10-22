@@ -1,6 +1,9 @@
 package com.collabcode.app.ui
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -464,6 +467,9 @@ private fun ChatPage(
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val empty = app.chat.isEmpty()
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        app.addAttachments(uris)
+    }
 
     LaunchedEffect(seed) {
         if (seed.isNotEmpty()) {
@@ -515,10 +521,12 @@ private fun ChatPage(
             }
         }
 
+        AttachmentRow(app)
         if (app.busy) {
             StopBar(onStop = { app.stopSend() })
         } else {
             Composer(
+                onPlus = { picker.launch("*/*") },
                 value = input,
                 onValueChange = { input = it },
                 placeholder = "Ask me anything...",
@@ -592,5 +600,29 @@ private fun TabItem(icon: String, label: String, selected: Boolean, onClick: () 
     ) {
         Text(icon, fontSize = 18.sp, color = color)
         Text(label, fontSize = 11.sp, color = color)
+    }
+}
+
+@Composable
+private fun AttachmentRow(app: AppState) {
+    if (app.attachments.isEmpty()) return
+    val cc = LocalCC.current
+    val shape = RoundedCornerShape(14.dp)
+    Row(
+        Modifier.fillMaxWidth().padding(start = 12.dp, top = 8.dp, end = 12.dp)
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        app.attachments.toList().forEach { item ->
+            Row(
+                Modifier.clip(shape).border(1.dp, cc.border, shape).background(cc.surface)
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(item.name, fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.width(6.dp))
+                Text("×", fontSize = 14.sp, color = cc.muted, modifier = Modifier.clickable { app.removeAttachment(item) })
+            }
+        }
     }
 }

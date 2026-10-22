@@ -2,13 +2,15 @@ package com.wani.terminal
 
 import android.content.Context
 import android.net.Uri
+import android.os.PowerManager
 import android.provider.OpenableColumns
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,10 +22,11 @@ import org.json.JSONObject
 import java.io.File
 import java.io.IOException
 import java.net.HttpURLConnection
+import java.net.URL
 import java.net.URLDecoder
 import java.net.URLEncoder
-import java.net.URL
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.ThreadFactory
 
 enum class Role { USER, ASSISTANT, TOOL, SYSTEM, ERROR }
 
@@ -40,7 +43,7 @@ object BackgroundJobs {
         @Volatile var result: CommandResult? = null
     }
 
-    private val jobs = ConcurrentHashMap<Int, BgJob>()
+    private val jobs = java.util.concurrent.ConcurrentHashMap<Int, BgJob>()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var nextId = 1
 
@@ -75,13 +78,21 @@ object BackgroundJobs {
 
 /**
  * AI assistant. OpenAI-compatible chat API (base URL, model, key Settings se).
- * Tools: run_command, start_background_job, job_status, type_in_terminal, write_file,
- * read_file, open_live_page. Risky tools user ki approval maangte hain (Settings se band ho sakti hai).
+ *
+ * v2.0: history aur chat app band hone ke baad bhi save rehti hai, kaam ke dauraan
+ * phone ko jagaye rakhta hai (wake lock), aur terminal mein AI ke commands dikhata hai.
+ * Sab state ek hi thread par badalti hai, taake race na ho.
  */
 class AiChat(private val context: Context) {
 
     private val settings = AppSettings(context)
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    private val aiThread = Executors.newSingleThreadExecutor(ThreadFactory { r ->
+        Thread(r, "wani-ai").apply { isDaemon = true }
+    }).asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + aiThread)
+
+    private val stateFile = File(context.filesDir, "ai_state.json")
 
     private val _messages = MutableStateFlow(listOf(ChatMessage(Role.SYSTEM, WELCOME)))
     val messages: StateFlow<List<ChatMessage>> = _messages.asStateFlow()
@@ -89,30 +100,33 @@ class AiChat(private val context: Context) {
     private val _busy = MutableStateFlow(false)
     val busy: StateFlow<Boolean> = _busy.asStateFlow()
 
-    /** Abhi AI kya kar raha hai (screen par dikhta hai). */
-    private val _status = MutableStateFlow("")
-    val status: StateFlow<String> = _status.asStateFlow()
-
+    // Sirf aiThread par badlti hai
     private var history = JSONArray()
-    private var job: Job? = null
+
+    @Volatile private var job: Job? = null
+
+    init {
+        load()
+    }
 
     fun send(prompt: String) {
         val text = prompt.trim()
         if (text.isEmpty() || _busy.value) return
-        append(ChatMessage(Role.USER, text))
-        history.put(JSONObject().put("role", "user").put("content", text))
         _busy.value = true
-        _status.value = "Starting…"
         job = scope.launch {
+            val wake = acquireWakeLock()
             try {
+                append(ChatMessage(Role.USER, text))
+                history.put(JSONObject().put("role", "user").put("content", text))
                 runLoop()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 append(ChatMessage(Role.ERROR, e.message ?: e.toString()))
             } finally {
+                releaseWakeLock(wake)
                 _busy.value = false
-                _status.value = ""
+                save()
             }
         }
     }
@@ -120,13 +134,20 @@ class AiChat(private val context: Context) {
     /** Upload: file ko /root/uploads mein copy karta hai, AI ko uska path deta hai. */
     fun attachFile(uri: Uri) {
         scope.launch {
+            if (_busy.value) {
+                append(ChatMessage(Role.SYSTEM, "Upload again after the AI finishes this step."))
+                return@launch
+            }
             try {
                 val name = safeName(displayName(uri))
-                val dir = File(ProotRunner.rootfsDir(context), "root/uploads").apply { mkdirs() }
-                val dest = File(dir, name)
-                context.contentResolver.openInputStream(uri)?.use { input ->
-                    dest.outputStream().use { out -> input.copyTo(out) }
-                } ?: throw IllegalStateException("Could not open the selected file.")
+                val dest = withContext(Dispatchers.IO) {
+                    val dir = File(ProotRunner.rootfsDir(context), "root/uploads").apply { mkdirs() }
+                    val file = File(dir, name)
+                    context.contentResolver.openInputStream(uri)?.use { input ->
+                        file.outputStream().use { out -> input.copyTo(out) }
+                    } ?: throw IllegalStateException("Could not open the selected file.")
+                    file
+                }
                 val linuxPath = "/root/uploads/${dest.name}"
                 append(ChatMessage(Role.SYSTEM, "Uploaded $linuxPath (${dest.length()} bytes)"))
                 history.put(
@@ -135,6 +156,7 @@ class AiChat(private val context: Context) {
                         "I uploaded a file to $linuxPath (${dest.length()} bytes). Use read_file or run_command on it when I ask."
                     )
                 )
+                save()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -147,18 +169,118 @@ class AiChat(private val context: Context) {
         job?.cancel()
         job = null
         _busy.value = false
-        _status.value = ""
         append(ChatMessage(Role.SYSTEM, "Stopped. Background jobs keep running."))
     }
 
     fun clear() {
         if (_busy.value) return
-        history = JSONArray()
-        _messages.value = listOf(ChatMessage(Role.SYSTEM, WELCOME))
+        scope.launch {
+            history = JSONArray()
+            _messages.value = listOf(ChatMessage(Role.SYSTEM, WELCOME))
+            save()
+        }
     }
 
     private fun append(m: ChatMessage) {
-        _messages.update { it + m }
+        _messages.update { (it + m).takeLast(MAX_MESSAGES) }
+    }
+
+    // ------------------------------------------------------------ save / load
+
+    /** Chat aur history phone par save karta hai (app dobara khulne par wahin se chalti hai). */
+    private fun save() {
+        runCatching {
+            val msgs = JSONArray()
+            for (m in _messages.value.takeLast(MAX_SAVED_MESSAGES)) {
+                msgs.put(JSONObject().put("role", m.role.name).put("text", m.text))
+            }
+            val root = JSONObject().put("history", history).put("messages", msgs)
+            stateFile.writeText(root.toString())
+        }
+    }
+
+    private fun load() {
+        if (!stateFile.isFile) return
+        runCatching {
+            val root = JSONObject(stateFile.readText())
+            history = root.optJSONArray("history") ?: JSONArray()
+            val arr = root.optJSONArray("messages") ?: JSONArray()
+            val list = ArrayList<ChatMessage>()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val role = runCatching { Role.valueOf(o.optString("role")) }.getOrDefault(Role.SYSTEM)
+                list.add(ChatMessage(role, o.optString("text")))
+            }
+            if (list.isNotEmpty()) {
+                _messages.value = listOf(ChatMessage(Role.SYSTEM, "Earlier chat restored. Tap Clear to start fresh.")) + list
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ wake lock (24/7 kaam ke liye)
+
+    private fun acquireWakeLock(): PowerManager.WakeLock? = runCatching {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "wani:ai").apply {
+            setReferenceCounted(false)
+            acquire(WAKE_LOCK_MS)
+        }
+    }.getOrNull()
+
+    private fun releaseWakeLock(lock: PowerManager.WakeLock?) {
+        runCatching {
+            if (lock != null && lock.isHeld) lock.release()
+        }
+    }
+
+    // ------------------------------------------------------------ history hygiene
+
+    /**
+     * Agar koi tool call bina jawab (result) ke reh gaya ho (jaise Stop dabane par),
+     * to API error deta hai. Ye har adhoore call ke liye khali result bhar deta hai,
+     * aur bina tool_call wale orphan result hata deta hai.
+     */
+    private fun repairHistory() {
+        val out = JSONArray()
+        val pending = LinkedHashSet<String>()
+        for (i in 0 until history.length()) {
+            val m = history.getJSONObject(i)
+            val role = m.optString("role")
+            if (role == "tool") {
+                val id = m.optString("tool_call_id")
+                if (pending.remove(id)) out.put(m)
+                continue
+            }
+            if (pending.isNotEmpty()) {
+                for (id in pending) out.put(stubResult(id))
+                pending.clear()
+            }
+            out.put(m)
+            if (role == "assistant") {
+                val calls = m.optJSONArray("tool_calls")
+                if (calls != null) {
+                    for (j in 0 until calls.length()) pending.add(calls.getJSONObject(j).optString("id"))
+                }
+            }
+        }
+        for (id in pending) out.put(stubResult(id))
+        history = out
+    }
+
+    private fun stubResult(id: String): JSONObject =
+        JSONObject()
+            .put("role", "tool")
+            .put("tool_call_id", id)
+            .put("content", "This step was stopped before it finished.")
+
+    /** History bahut lambi ho to purani baatein chhod deta hai (hamesha user message se shuru hota hai). */
+    private fun trimHistory() {
+        if (history.length() <= MAX_HISTORY) return
+        var start = history.length() - KEEP_HISTORY
+        while (start < history.length() && history.getJSONObject(start).optString("role") != "user") start++
+        val out = JSONArray()
+        for (i in start until history.length()) out.put(history.get(i))
+        history = out
     }
 
     private fun displayName(uri: Uri): String {
@@ -174,8 +296,10 @@ class AiChat(private val context: Context) {
         if (settings.aiApiKey.isBlank() && !isLocalBase(settings.aiBaseUrl)) {
             throw IllegalStateException("No API key yet. Open Settings and add your AI API key.")
         }
+        repairHistory()
+        trimHistory()
         for (step in 0 until MAX_STEPS) {
-            val message = requestWithRetry(step)
+            val message = requestWithRetry()
             val content = if (message.isNull("content")) "" else message.optString("content")
             val calls = message.optJSONArray("tool_calls")
 
@@ -194,8 +318,14 @@ class AiChat(private val context: Context) {
                 val fn = call.getJSONObject("function")
                 val args = runCatching { JSONObject(fn.optString("arguments", "{}")) }
                     .getOrElse { JSONObject() }
-                _status.value = statusFor(fn.optString("name"), args)
-                val result = execute(fn.optString("name"), args)
+                // Tool ka error bhi model ko result ki tarah jaata hai, loop nahi tootta
+                val result = try {
+                    execute(fn.optString("name"), args)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    "Tool error: ${e.message ?: e.toString()}"
+                }
                 history.put(
                     JSONObject()
                         .put("role", "tool")
@@ -208,16 +338,18 @@ class AiChat(private val context: Context) {
     }
 
     /** Model ko request bhejta hai. Network ya server (429/5xx) ka masla ho to 3 dafa tak try karta hai. */
-    private suspend fun requestWithRetry(step: Int): JSONObject {
+    private suspend fun requestWithRetry(): JSONObject {
         var lastError: Exception? = null
+        // Body aiThread par banti hai (history yahin badalti hai), network IO par chalta hai
+        val body = JSONObject()
+            .put("model", settings.aiModel)
+            .put("temperature", 0.2)
+            .put("messages", buildMessages())
+            .put("tools", toolSpecs())
+            .put("tool_choice", "auto")
         for (attempt in 1..3) {
-            _status.value = if (attempt == 1) {
-                "Thinking (step ${step + 1}/$MAX_STEPS)…"
-            } else {
-                "Network problem, retrying ($attempt/3)…"
-            }
             try {
-                return withContext(Dispatchers.IO) { requestCompletion() }
+                return withContext(Dispatchers.IO) { requestCompletion(body) }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: IOException) {
@@ -232,27 +364,7 @@ class AiChat(private val context: Context) {
         throw lastError ?: IllegalStateException("AI request failed")
     }
 
-    /** Status line ke liye: tool kya kar raha hai. */
-    private fun statusFor(name: String, args: JSONObject): String = when (name) {
-        "run_command", "start_background_job" -> "Running: " + args.optString("command").take(70)
-        "type_in_terminal" -> "Typing into the terminal…"
-        "write_file" -> "Writing: " + args.optString("path").take(60)
-        "read_file" -> "Reading: " + args.optString("path").take(60)
-        "web_search" -> "Searching the web…"
-        "web_fetch" -> "Fetching a web page…"
-        "open_live_page" -> "Waiting for your answer on the page…"
-        "job_status" -> "Checking a background job…"
-        else -> "Running tool: $name"
-    }
-
-    private fun requestCompletion(): JSONObject {
-        val body = JSONObject()
-            .put("model", settings.aiModel)
-            .put("temperature", 0.2)
-            .put("messages", buildMessages())
-            .put("tools", toolSpecs())
-            .put("tool_choice", "auto")
-
+    private fun requestCompletion(body: JSONObject): JSONObject {
         val conn = URL(settings.aiBaseUrl + "/chat/completions").openConnection() as HttpURLConnection
         try {
             conn.requestMethod = "POST"
@@ -282,7 +394,13 @@ class AiChat(private val context: Context) {
 
     private fun buildMessages(): JSONArray {
         val arr = JSONArray()
-        arr.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+        val custom = settings.aiCustomInstructions
+        val system = if (custom.isBlank()) {
+            SYSTEM_PROMPT
+        } else {
+            SYSTEM_PROMPT + "\n\nExtra instructions from the user (follow them unless they conflict with the rules above):\n" + custom
+        }
+        arr.put(JSONObject().put("role", "system").put("content", system))
         for (i in 0 until history.length()) arr.put(history.get(i))
         return arr
     }
@@ -296,6 +414,11 @@ class AiChat(private val context: Context) {
             "id" to "Job id number, or 'list'"))
         .put(tool("type_in_terminal", "Type a command into the visible terminal and press Enter. Its output appears in the terminal, not in this chat.",
             "text" to "The text to type"))
+        .put(tool("read_terminal", "Read the last lines of the visible terminal screen (what the user sees). Use it to check the output of a command or an error the user mentions.",
+            "lines" to "How many lines to read, for example 60"))
+        .put(tool("set_app_setting", "Change an app setting. Allowed names: shortcut_keys (comma-separated button ids, for example esc,tab,ctrl,up,down,enter,ai) and show_ai_in_terminal (true or false). The user approves the change unless they turned on Run without asking. API key, model and approval settings can only be changed by the user.",
+            "name" to "Setting name: shortcut_keys or show_ai_in_terminal",
+            "value" to "New value"))
         .put(tool("write_file", "Create or overwrite a text file in the Linux environment. Relative paths go to /root.",
             "path" to "File path, for example /root/hello.sh",
             "content" to "Full file content"))
@@ -319,7 +442,7 @@ class AiChat(private val context: Context) {
         val schema = JSONObject()
             .put("type", "object")
             .put("properties", props)
-            .put("required", required)
+        if (required.length() > 0) schema.put("required", required)
         return JSONObject()
             .put("type", "function")
             .put(
@@ -336,6 +459,8 @@ class AiChat(private val context: Context) {
         "start_background_job" -> startJob(args.optString("command"))
         "job_status" -> jobStatus(args.optString("id").trim())
         "type_in_terminal" -> typeInTerminal(args.optString("text"))
+        "read_terminal" -> readTerminal(args.optString("lines"))
+        "set_app_setting" -> setAppSetting(args.optString("name"), args.optString("value"))
         "write_file" -> writeFile(args.optString("path"), args.optString("content"))
         "read_file" -> readFile(args.optString("path"))
         "web_search" -> webSearch(args.optString("query"))
@@ -354,12 +479,20 @@ class AiChat(private val context: Context) {
         return if (approved) null else "The user denied this action. Do not retry it. Ask what they want instead."
     }
 
+    /** AI ke kaam ko terminal mein dikhata hai (Settings mein on ho to). */
+    private fun showInTerminal(header: String, body: String) {
+        if (!settings.aiShowInTerminal) return
+        val app = context.applicationContext as WaniApp
+        app.shell.logAi("[AI] $header\n" + body.take(MAX_TERMINAL_ECHO))
+    }
+
     private suspend fun runCommand(command: String): String {
         if (command.isBlank()) return "Empty command."
         allowedToRun(command)?.let { return it }
         val result = withContext(Dispatchers.IO) { ProotRunner.capture(context, command) }
         val body = result.output.trimEnd().ifEmpty { "(no output)" }
         append(ChatMessage(Role.TOOL, "\$ $command\n" + body.take(MAX_SHOWN)))
+        showInTerminal("$ $command", body)
         val timeoutNote = if (result.timedOut) " (timed out after 120 s and was stopped)" else ""
         return "exit code ${result.exitCode}$timeoutNote\n" + result.output.take(MAX_TOOL_OUTPUT)
     }
@@ -369,6 +502,7 @@ class AiChat(private val context: Context) {
         allowedToRun("(background) $command")?.let { return it }
         val id = BackgroundJobs.start(context, command)
         append(ChatMessage(Role.TOOL, "started background job #$id: $command"))
+        showInTerminal("background job #$id", command)
         return "Started background job $id. Check it later with job_status."
     }
 
@@ -386,7 +520,57 @@ class AiChat(private val context: Context) {
         val pty = app.shell.pty.value
         app.shell.send(text + if (pty) "\r" else "\n", echo = !pty)
         append(ChatMessage(Role.TOOL, "typed into terminal: $text"))
-        return "Typed into the terminal. Output shows in the terminal, not here."
+        return "Typed into the terminal. Output shows in the terminal, not here. Use read_terminal to see it."
+    }
+
+    /** AI ko sirf kuch safe settings badalne deta hai. API key, model, approval waghera user ke haath mein hi rehte hain. */
+    private suspend fun setAppSetting(name: String, value: String): String {
+        val key = name.trim()
+        val v = value.trim()
+        return when (key) {
+            "shortcut_keys" -> changeShortcutKeys(v)
+            "show_ai_in_terminal" -> changeShowInTerminal(v)
+            else -> "Unknown setting. Allowed: shortcut_keys, show_ai_in_terminal."
+        }
+    }
+
+    private suspend fun changeShortcutKeys(v: String): String {
+        val ids = v.split(',').map { it.trim() }.filter { ShortcutKeys.isKnown(it) }.distinct()
+        if (ids.isEmpty()) {
+            return "No valid button ids. Valid ids: " + ShortcutKeys.ALL.joinToString(", ") { it.id }
+        }
+        if (!settings.aiAutoApprove &&
+            !Approvals.ask("Change the shortcut bar?", "Buttons: " + ids.joinToString(", "))
+        ) {
+            return "The user denied this change. Do not retry it."
+        }
+        settings.shortcutKeys = ids
+        append(ChatMessage(Role.TOOL, "set shortcut bar: " + ids.joinToString(", ")))
+        return "Shortcut bar updated: " + ids.joinToString(", ")
+    }
+
+    private suspend fun changeShowInTerminal(v: String): String {
+        val on = when (v.lowercase()) {
+            "true", "on", "yes", "1" -> true
+            "false", "off", "no", "0" -> false
+            else -> return "Use true or false."
+        }
+        if (!settings.aiAutoApprove &&
+            !Approvals.ask("Change terminal logging?", "Show AI actions in terminal: $on")
+        ) {
+            return "The user denied this change. Do not retry it."
+        }
+        settings.aiShowInTerminal = on
+        return "Show AI actions in terminal is now " + (if (on) "on" else "off") + "."
+    }
+
+    /** Terminal screen ka aakhri hissa AI ko deta hai. */
+    private fun readTerminal(linesArg: String): String {
+        val lines = linesArg.trim().toIntOrNull()?.coerceIn(5, 300) ?: 60
+        val app = context.applicationContext as WaniApp
+        val screen = app.shell.recentText(lines).trimEnd()
+        append(ChatMessage(Role.TOOL, "read terminal ($lines lines)"))
+        return screen.ifBlank { "(terminal is empty)" }.takeLast(MAX_TOOL_OUTPUT)
     }
 
     private suspend fun writeFile(path: String, content: String): String {
@@ -398,6 +582,7 @@ class AiChat(private val context: Context) {
         file.parentFile?.mkdirs()
         file.writeText(content)
         append(ChatMessage(Role.TOOL, "wrote $abs (${content.length} chars)"))
+        showInTerminal("wrote $abs", "(${content.length} chars)")
         return "Wrote ${content.length} characters to $abs."
     }
 
@@ -481,7 +666,7 @@ class AiChat(private val context: Context) {
             conn.connectTimeout = 15_000
             conn.readTimeout = 20_000
             conn.instanceFollowRedirects = true
-            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 9) WaniTerminal/1.6")
+            conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 9) WaniTerminal/2.0")
             conn.setRequestProperty("Accept", "text/html,text/plain;q=0.9,*/*;q=0.5")
             val code = conn.responseCode
             if (code !in 200..299) throw IllegalStateException("HTTP $code from $url")
@@ -535,18 +720,26 @@ class AiChat(private val context: Context) {
     }
 
     companion object {
-        private const val MAX_STEPS = 16
+        private const val MAX_STEPS = 24
         private const val MAX_SHOWN = 1500
         private const val MAX_TOOL_OUTPUT = 6000
         private const val MAX_READ_BYTES = 40_000
+        private const val MAX_TERMINAL_ECHO = 2000
+        private const val MAX_MESSAGES = 400
+        private const val MAX_SAVED_MESSAGES = 300
+        private const val MAX_HISTORY = 120
+        private const val KEEP_HISTORY = 80
+        private const val WAKE_LOCK_MS = 30L * 60 * 1000
 
         private const val WELCOME =
             "Hi, I'm Wani AI. I can run commands, start background jobs, type into the terminal, " +
-                "edit files, read Downloads, and open live pages to ask you things. Add your API key in Settings to start."
+                "read what is on the terminal screen, edit files, search the web, read Downloads, and " +
+                "ask you things with live pages. Add your API key in Settings to start. " +
+                "I keep working while the app runs in the background."
 
         private val SYSTEM_PROMPT = """
             You are Wani AI, the built-in assistant of Wani Terminal, an Android app that runs a real Debian Linux shell (arm64, through proot).
-            Reply in English. Be brief and clear. Use tools when they help; never guess file contents or command output.
+            Reply in English unless the user writes in another language. Be brief and clear. Use tools when they help; never guess file contents or command output.
 
             Environment:
             - Shell: bash as root in the Debian rootfs. Home directory: /root. Uploaded files are in /root/uploads.
@@ -556,10 +749,13 @@ class AiChat(private val context: Context) {
 
             How to work:
             - Use run_command for quick commands. Use start_background_job for long ones (installs, builds), then job_status to check.
+            - After a command, read its result before the next step. If a command fails, read the error, fix it and retry.
+            - Use read_terminal to see what is on the user's terminal screen before answering questions about it.
             - Use write_file to create scripts, then run them (chmod +x for shell scripts).
             - Use type_in_terminal only when the user wants something visible in the terminal.
             - When you need a choice or information from the user, use open_live_page with a small HTML form. Its submit button must call WaniBridge.submit(answer). Then continue with the answer.
-            - If a command fails, read the error, fix it and retry. Stop and ask only when you need the user's decision.
+            - For multi-step tasks, keep the user informed with one short line per step.
+            - Stop and ask only when you need the user's decision.
 
             Rules:
             - Say what you are about to do before risky actions.

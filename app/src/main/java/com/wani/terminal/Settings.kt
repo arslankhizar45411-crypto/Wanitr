@@ -73,6 +73,31 @@ class AppSettings(context: Context) {
             prefs.edit().putString(K_GH_BRANCH, value.trim()).apply()
         }
 
+    /** AI ko extra hidayat (system prompt ke saath jaati hai). Max 4000 characters. */
+    var aiCustomInstructions: String
+        get() = prefs.getString(K_CUSTOM, "") ?: ""
+        set(value) {
+            prefs.edit().putString(K_CUSTOM, value.trim().take(4000)).apply()
+        }
+
+    /** On ho to AI ke commands aur unka output terminal mein bhi dikhte hain. */
+    var aiShowInTerminal: Boolean
+        get() = prefs.getBoolean(K_SHOW_TERM, true)
+        set(value) {
+            prefs.edit().putBoolean(K_SHOW_TERM, value).apply()
+        }
+
+    /** Shortcut bar mein dikhne wale buttons (ID ki list, isi order mein). */
+    var shortcutKeys: List<String>
+        get() {
+            val saved = prefs.getString(K_SHORTCUTS, null) ?: return ShortcutKeys.DEFAULT
+            val ids = saved.split(',').map { it.trim() }.filter { ShortcutKeys.isKnown(it) }.distinct()
+            return if (ids.isEmpty()) ShortcutKeys.DEFAULT else ids
+        }
+        set(value) {
+            prefs.edit().putString(K_SHORTCUTS, value.joinToString(",")).apply()
+        }
+
     companion object {
         const val DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
         const val DEFAULT_MODEL = "openrouter/free"
@@ -87,5 +112,8 @@ class AppSettings(context: Context) {
         private const val K_GH_REPO = "gh_repo"
         private const val K_GH_WORKFLOW = "gh_workflow"
         private const val K_GH_BRANCH = "gh_branch"
+        private const val K_CUSTOM = "ai_custom_instructions"
+        private const val K_SHOW_TERM = "ai_show_in_terminal"
+        private const val K_SHORTCUTS = "shortcut_keys_v2"
     }
 }

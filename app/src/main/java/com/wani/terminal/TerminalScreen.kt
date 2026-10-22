@@ -20,9 +20,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -32,6 +34,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -41,6 +44,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -57,15 +61,18 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.launch
 import java.io.File
 
 /** Chhupa hua marker: keyboard isi ke zariye khulta hai aur Backspace pakda jata hai. */
@@ -124,29 +131,42 @@ fun saveToDownloads(context: Context, name: String, bytes: ByteArray): String {
 @Composable
 fun TerminalScreen(
     shell: ShellSession,
+    sessions: SessionManager,
     onNavigate: (Screen) -> Unit,
     onAskAi: (String) -> Unit
 ) {
+    val app = LocalContext.current.applicationContext as WaniApp
+
     val text by shell.text.collectAsState()
     val running by shell.running.collectAsState()
     val pty by shell.pty.collectAsState()
     val alt by shell.altScreen.collectAsState()
     val images by shell.images.collectAsState()
+    val sessionList by sessions.list.collectAsState()
+    val sessionIndex by sessions.index.collectAsState()
 
-    // Chhupa hua input. Hamesha SENTINEL par rehta hai.
-    var field by remember { mutableStateOf(SENTINEL) }
+    // Shortcut bar ki list (Settings se badalti hai)
+    val shortcutIds by remember { mutableStateOf(app.settings.shortcutKeys) }
+
+    // Chhupa hua input. Field mein sirf wahi text hota hai jo abhi shell ko nahi gaya.
+    var fieldValue by remember { mutableStateOf(TextFieldValue(SENTINEL, TextRange(SENTINEL.length))) }
+    // Wo text jo shell ko bhej diya gaya (SENTINEL ke baghair)
+    var sent by remember { mutableStateOf("") }
     var ctrlKey by remember { mutableStateOf(false) }
     var altKey by remember { mutableStateOf(false) }
     var menuOpen by remember { mutableStateOf(false) }
     var follow by remember { mutableStateOf(true) }
     var preview by remember { mutableStateOf<TermImage?>(null) }
+    var cellOpen by remember { mutableStateOf(false) }
     // Jo user ne is line par type kiya (sirf @ai pakadne ke liye)
     val typedLine = remember { StringBuilder() }
 
     val scroll = rememberScrollState()
     val hScroll = rememberScrollState()
     val barScroll = rememberScrollState()
+    val sessScroll = rememberScrollState()
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val measurer = rememberTextMeasurer()
     val cell = remember(measurer) { measurer.measure("M", TermStyle).size }
@@ -187,6 +207,13 @@ fun TerminalScreen(
         shell.send(seq)
     }
 
+    /** Arrow/Home/End: app ke mode (DECCKM) ke hisaab se sequence bhejta hai. */
+    fun sendKey(normal: String, application: String? = null) {
+        typedLine.clear()
+        follow = true
+        shell.sendKey(normal, application)
+    }
+
     /** Typed text bhejta hai, Ctrl/Alt sticky keys ke saath. PTY na ho to local echo bhi hota hai. */
     fun sendTyped(typed: String) {
         val modified = ctrlKey || altKey
@@ -198,23 +225,70 @@ fun TerminalScreen(
         shell.send(out, echo = !pty)
     }
 
-    fun sendBackspace() {
+    /** Ek DEL (Backspace) shell ko bhejta hai. Field ko nahi chhedta. */
+    fun sendDel() {
         if (typedLine.isNotEmpty()) typedLine.deleteCharAt(typedLine.length - 1)
         follow = true
         shell.send("\u007F")
     }
 
+    fun resetField() {
+        fieldValue = TextFieldValue(SENTINEL, TextRange(SENTINEL.length))
+        sent = ""
+    }
+
+    /**
+     * Field ka naya text pichhle bheje hue text se milata hai. Jo hissa mit gaya uska DEL,
+     * jo naya aaya uska text shell ko jaata hai. Ye IME (Gboard) ke saath bhi sahi chalta hai.
+     */
+    fun syncField(v: TextFieldValue, lostSentinel: Boolean) {
+        val newText = v.text.replace(SENTINEL, "")
+        val oldText = sent
+        var p = 0
+        val max = minOf(oldText.length, newText.length)
+        while (p < max && oldText[p] == newText[p]) p++
+        var dels = oldText.length - p
+        // Khaali field par Backspace: marker hatta hai, text nahi. Ye bhi ek DEL hai.
+        if (dels == 0 && lostSentinel) dels = 1
+        repeat(dels) { sendDel() }
+        val added = newText.substring(p)
+        if (added.isNotEmpty()) sendTyped(added)
+        sent = newText
+        fieldValue = when {
+            newText.isEmpty() -> TextFieldValue(SENTINEL, TextRange(SENTINEL.length))
+            v.text.contains(SENTINEL) -> v
+            else -> TextFieldValue(SENTINEL + newText, TextRange(SENTINEL.length + newText.length))
+        }
+    }
+
+    /** Field mein jo bhi pada hai (composing text bhi) use abhi shell ko bhejo. */
+    fun flushField() {
+        syncField(fieldValue, lostSentinel = false)
+    }
+
+    /** Hidden field ka har badlao. Gboard jab word compose kar raha ho to intezaar karta hai. */
+    fun onFieldChange(v: TextFieldValue) {
+        val hadSentinel = fieldValue.text.contains(SENTINEL)
+        fieldValue = v
+        if (v.composition != null) return
+        syncField(v, lostSentinel = hadSentinel && !v.text.contains(SENTINEL))
+    }
+
     fun sendEnter() {
+        flushField()
         typedLine.clear()
+        resetField()
         follow = true
         if (pty) shell.send("\r") else shell.send("\n", echo = true)
     }
 
     /** Enter: agar line "@ai ..." hai to shell ko nahi, AI ko bhejo. */
     fun submitLine() {
+        flushField()
         val line = typedLine.toString().trim()
         if (pty && (line == "@ai" || line.startsWith("@ai "))) {
             typedLine.clear()
+            resetField()
             shell.send("\u0015") // readline: current line saaf karo
             onAskAi(line.removePrefix("@ai").trim())
             return
@@ -222,19 +296,40 @@ fun TerminalScreen(
         sendEnter()
     }
 
-    /** Hidden field ka har badlao: naye characters shell ko, khaali field par Backspace. */
-    fun onFieldChange(newValue: String) {
-        val hadSentinel = newValue.contains(SENTINEL)
-        val typed = newValue.replace(SENTINEL, "")
-        if (!hadSentinel) sendBackspace()
-        if (typed.isNotEmpty()) sendTyped(typed)
-        field = SENTINEL
+    /** Shortcut bar ke button ka kaam. */
+    fun runShortcut(id: String) {
+        when (id) {
+            "esc" -> sendRaw("\u001B")
+            "tab" -> if (pty) sendRaw("\t") else sendTyped("  ")
+            "ctrl" -> ctrlKey = !ctrlKey
+            "alt" -> altKey = !altKey
+            "up" -> sendKey("\u001B[A", "\u001BOA")
+            "down" -> sendKey("\u001B[B", "\u001BOB")
+            "right" -> sendKey("\u001B[C", "\u001BOC")
+            "left" -> sendKey("\u001B[D", "\u001BOD")
+            "enter" -> submitLine()
+            "ctrlc" -> if (pty) sendRaw("\u0003") else shell.interrupt()
+            "ctrld" -> sendRaw("\u0004")
+            "ctrlz" -> sendRaw("\u001A")
+            "ctrll" -> sendRaw("\u000C")
+            "home" -> sendKey("\u001B[H", "\u001BOH")
+            "end" -> sendKey("\u001B[F", "\u001BOF")
+            "pgup" -> sendRaw("\u001B[5~")
+            "pgdn" -> sendRaw("\u001B[6~")
+            "slash" -> sendTyped("/")
+            "dash" -> sendTyped("-")
+            "pipe" -> sendTyped("|")
+            "tilde" -> sendTyped("~")
+            "dot" -> sendTyped(".")
+            "cell" -> cellOpen = !cellOpen
+            "ai" -> onAskAi("")
+        }
     }
 
     Column(modifier = Modifier.fillMaxSize().background(Bg)) {
         // Chhupa hua input (1dp). Ye focus mein rehta hai, isliye keyboard khulta hai.
         BasicTextField(
-            value = field,
+            value = fieldValue,
             onValueChange = { onFieldChange(it) },
             singleLine = true,
             textStyle = TextStyle(color = Color.Transparent, fontSize = 1.sp),
@@ -296,7 +391,26 @@ fun TerminalScreen(
                         text = { Text("Paste") },
                         onClick = {
                             menuOpen = false
-                            sendTyped(clipboard.getText()?.text ?: "")
+                            val clip: String = clipboard.getText()?.text ?: ""
+                            if (clip.isNotEmpty()) {
+                                typedLine.append(clip)
+                                follow = true
+                                shell.paste(clip)
+                            }
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("New session") },
+                        onClick = {
+                            menuOpen = false
+                            sessions.newSession()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Close this session") },
+                        onClick = {
+                            menuOpen = false
+                            sessions.close(sessionIndex)
                         }
                     )
                     DropdownMenuItem(
@@ -312,6 +426,13 @@ fun TerminalScreen(
                         onClick = {
                             menuOpen = false
                             shell.clearImages()
+                        }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(if (cellOpen) "Hide AI cell" else "Show AI cell") },
+                        onClick = {
+                            menuOpen = false
+                            cellOpen = !cellOpen
                         }
                     )
                     DropdownMenuItem(
@@ -347,6 +468,22 @@ fun TerminalScreen(
             }
         }
 
+        // Session tabs: 1 2 3 ... aur + naya session
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Panel)
+                .horizontalScroll(sessScroll)
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            sessionList.forEachIndexed { i, _ ->
+                KeyChip(label = "${i + 1}", active = i == sessionIndex) { sessions.select(i) }
+            }
+            KeyChip(label = "+") { sessions.newSession() }
+        }
+
         // Terminal output: tap karne par keyboard khulta hai. Lambi lines side scroll hoti hain.
         BoxWithConstraints(
             modifier = Modifier
@@ -363,7 +500,7 @@ fun TerminalScreen(
 
             // Size pata chalne ke baad shell start karo, taake PTY ka size sahi ho
             LaunchedEffect(cols, rows) {
-                shell.setSize(cols, rows)
+                shell.resize(cols, rows)
                 if (!shell.running.value) startTerminalService(ctx)
             }
 
@@ -377,6 +514,16 @@ fun TerminalScreen(
                     .verticalScroll(scroll)
                     .padding(10.dp)
             )
+
+            // AI cell: terminal ke upar hi tairta hai (terminal ka size nahi badalta)
+            if (cellOpen) {
+                AiCellPanel(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth(),
+                    onClose = { cellOpen = false }
+                )
+            }
         }
 
         // Graphics strip: wani-show se aayi images
@@ -401,26 +548,27 @@ fun TerminalScreen(
                             .clickable { preview = img }
                     )
                 }
-                KeyChip("Clear") { shell.clearImages() }
+                KeyChip(label = "Clear") { shell.clearImages() }
             }
         }
 
-        // Sirf 7 buttons, ek hi line mein, barabar size ke
+        // Shortcut bar: Settings se aap jo buttons chunte ho, wahi dikhte hain (scroll bhi hota hai)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(Panel)
+                .horizontalScroll(barScroll)
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            KeyButton("Esc", Modifier.weight(1f)) { sendRaw("\u001B") }
-            KeyButton("Tab", Modifier.weight(1f)) { if (pty) sendRaw("\t") else sendTyped("  ") }
-            KeyButton("Ctrl", Modifier.weight(1f), active = ctrlKey) { ctrlKey = !ctrlKey }
-            KeyButton("↑", Modifier.weight(1f)) { sendRaw("\u001B[A") }
-            KeyButton("↓", Modifier.weight(1f)) { sendRaw("\u001B[B") }
-            KeyButton("⌫", Modifier.weight(1f)) { sendBackspace() }
-            KeyButton("AI", Modifier.weight(1f), accent = true) { onAskAi("") }
+            shortcutIds.forEach { id ->
+                ShortcutButton(
+                    label = ShortcutKeys.labelOf(id),
+                    active = (id == "ctrl" && ctrlKey) || (id == "alt" && altKey),
+                    accent = id == "ai"
+                ) { runShortcut(id) }
+            }
         }
     }
 
@@ -439,9 +587,16 @@ fun TerminalScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    val msg = runCatching { saveToDownloads(ctx, img.name, img.bytes) }
-                        .getOrElse { "Not saved: ${it.message}" }
-                    Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                    scope.launch {
+                        val msg = runCatching {
+                            // Android 9 aur pehle par Downloads mein likhne ke liye storage permission chahiye
+                            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q && !StoragePermission.request(ctx)) {
+                                error("storage permission nahi mili")
+                            }
+                            saveToDownloads(ctx, img.name, img.bytes)
+                        }.getOrElse { "Not saved: ${it.message}" }
+                        Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                    }
                 }) {
                     Text("Save to Downloads")
                 }
@@ -450,5 +605,92 @@ fun TerminalScreen(
                 TextButton(onClick = { preview = null }) { Text("Close") }
             }
         )
+    }
+}
+
+/** Shortcut bar ka button. Label ke around padding rakhta hai taake tap aasaan ho. */
+@Composable
+private fun ShortcutButton(label: String, active: Boolean, accent: Boolean, onClick: () -> Unit) {
+    val bg = when {
+        accent -> Accent
+        active -> Accent.copy(alpha = 0.45f)
+        else -> Chip
+    }
+    val fg = if (accent || active) Color.Black else TextMain
+    Box(
+        modifier = Modifier
+            .height(36.dp)
+            .widthIn(min = 44.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            label,
+            color = fg,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 14.sp,
+            fontWeight = if (accent || active) FontWeight.Bold else FontWeight.Normal
+        )
+    }
+}
+
+/** Terminal ke upar chhota AI box: sawal poochho, jawab yahin dikhe, commands terminal mein chalen. */
+@Composable
+private fun AiCellPanel(modifier: Modifier, onClose: () -> Unit) {
+    val app = LocalContext.current.applicationContext as WaniApp
+    val messages by app.ai.messages.collectAsState()
+    val busy by app.ai.busy.collectAsState()
+    var prompt by remember { mutableStateOf("") }
+    val reply = messages.lastOrNull { it.role == Role.ASSISTANT || it.role == Role.ERROR }?.text.orEmpty()
+
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+            .background(Panel)
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("AI cell", color = Accent, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            Spacer(Modifier.weight(1f))
+            if (busy) Text("working...", color = Muted, fontSize = 11.sp)
+            TextButton(onClick = onClose) { Text("Close", color = Muted) }
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 160.dp)
+                .verticalScroll(rememberScrollState())
+        ) {
+            Text(
+                reply.ifBlank { "Ask anything. AI commands run in the Linux shell and show up in the terminal." },
+                color = TextMain,
+                fontSize = 13.sp
+            )
+        }
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = prompt,
+                onValueChange = { prompt = it },
+                modifier = Modifier.weight(1f),
+                placeholder = { Text("Ask AI...", color = Muted) },
+                textStyle = TextStyle(color = TextMain, fontSize = 14.sp),
+                maxLines = 3,
+                shape = RoundedCornerShape(12.dp)
+            )
+            Spacer(Modifier.width(6.dp))
+            TextButton(
+                enabled = !busy && prompt.isNotBlank(),
+                onClick = {
+                    app.ai.send(prompt)
+                    prompt = ""
+                }
+            ) {
+                Text("Run", color = Accent, fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }

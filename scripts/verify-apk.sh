@@ -35,12 +35,19 @@ fi
 
 # Placeholder rootfs settings release/tag builds mein nahi jaani chahiye
 if [ "$STRICT" = "true" ]; then
-  if unzip -p "$APK" classes.dex | grep -aq "example.com/rootfs"; then
+  # classes.dex pehle file mein likho: "unzip | grep -q" par grep jaldi exit karta hai,
+  # to pipefail se match ke bawajood check fail ho jata tha (galat result).
+  DEX_TMP="$(mktemp)"
+  unzip -p "$APK" classes.dex > "$DEX_TMP"
+  if grep -aq "example.com/rootfs" "$DEX_TMP"; then
+    rm -f "$DEX_TMP"
     fail "ROOTFS_URL placeholder hai. GitHub repo variable ROOTFS_URL set karein"
   fi
-  if unzip -p "$APK" classes.dex | grep -aq "0000000000000000000000000000000000000000000000000000000000000000"; then
+  if grep -aq "0000000000000000000000000000000000000000000000000000000000000000" "$DEX_TMP"; then
+    rm -f "$DEX_TMP"
     fail "ROOTFS_SHA256 placeholder hai. GitHub repo variable ROOTFS_SHA256 set karein"
   fi
+  rm -f "$DEX_TMP"
 fi
 
 mkdir -p "$OUTDIR"

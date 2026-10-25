@@ -12,8 +12,9 @@ android {
         applicationId = "com.collabcode.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 6
+        versionName = "0.6.0"
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildTypes {
@@ -27,6 +28,11 @@ android {
     kotlinOptions { jvmTarget = "17" }
 
     buildFeatures { compose = true }
+
+    packaging {
+        // proot is started from the native library folder, so the libraries must be unpacked there.
+        jniLibs { useLegacyPackaging = true }
+    }
 }
 
 dependencies {
@@ -38,4 +44,6 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    implementation("org.apache.commons:commons-compress:1.26.2")
+    implementation("org.tukaani:xz:1.9")
 }

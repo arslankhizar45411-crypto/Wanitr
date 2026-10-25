@@ -11,7 +11,9 @@ import com.collabcode.app.data.GhRun
 object Notifier {
     const val CH_WATCH = "build_watch"
     const val CH_DONE = "build_done"
+    const val CH_TERM = "terminal"
     const val WATCH_ID = 1001
+    const val TERMINAL_ID = 1002
 
     fun ensureChannels(context: Context) {
         val nm = context.getSystemService(NotificationManager::class.java)
@@ -20,6 +22,9 @@ object Notifier {
         )
         nm.createNotificationChannel(
             NotificationChannel(CH_DONE, "Build finished", NotificationManager.IMPORTANCE_DEFAULT)
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CH_TERM, "Terminal", NotificationManager.IMPORTANCE_LOW)
         )
     }
 
@@ -36,6 +41,15 @@ object Notifier {
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setContentTitle("CollabCode")
             .setContentText("Watching your build...")
+            .setOngoing(true)
+            .setContentIntent(openApp(context))
+            .build()
+
+    fun terminal(context: Context): Notification =
+        Notification.Builder(context, CH_TERM)
+            .setSmallIcon(android.R.drawable.stat_sys_download)
+            .setContentTitle("CollabAgent terminal")
+            .setContentText("Debian is running or being set up")
             .setOngoing(true)
             .setContentIntent(openApp(context))
             .build()

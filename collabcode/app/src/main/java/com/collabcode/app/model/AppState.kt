@@ -12,6 +12,9 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.collabcode.app.BuildWatchService
+import com.collabcode.app.core.AuditLog
+import com.collabcode.app.core.Redactor
+import com.collabcode.app.terminal.TerminalEngine
 import com.collabcode.app.data.AiClient
 import com.collabcode.app.data.ApiException
 import com.collabcode.app.data.DiffLine
@@ -37,6 +40,15 @@ data class PendingEdit(val file: String, val newContent: String, val diff: List<
 data class BuildRun(val id: Long, val number: Int, val status: String, val url: String)
 
 
+enum class CmdState { Pending, Running, Done, Failed, Rejected }
+
+/** A shell command the AI proposed. It runs only after the user taps Run. */
+class PendingCommand(val command: String) {
+    var state by mutableStateOf(CmdState.Pending)
+    var output by mutableStateOf("")
+    var exit by mutableStateOf<Int?>(null)
+}
+
 sealed interface ChatItem
 class UserMsg(val text: String) : ChatItem
 class NoticeMsg(val tool: String, val arg: String, val note: String) : ChatItem
@@ -45,6 +57,7 @@ class AssistantMsg(
     val toolArg: String?,
     val text: String,
     val edits: List<PendingEdit>,
+    val commands: List<PendingCommand> = emptyList(),
 ) : ChatItem {
     var status by mutableStateOf(EditStatus.Pending)
 }
@@ -53,6 +66,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
     val prefs = Prefs(application)
     private val store = ProjectStore(application)
     private val chatStore = ChatStore(application)
+    private val audit = AuditLog(File(application.filesDir, "audit.log"))
     private var pollJob: Job? = null
     private var sendJob: Job? = null
     private val saveJobs = HashMap<String, Job>()
@@ -66,6 +80,8 @@ class AppState(application: Application) : AndroidViewModel(application) {
     val files = mutableStateMapOf<String, String>()
     val chat = mutableStateListOf<ChatItem>()
     val attachments = mutableStateListOf<Attachment>()
+    private val commandNotes = mutableListOf<String>()
+    private val execJobs = java.util.concurrent.CopyOnWriteArrayList<Job>()
     val builds = mutableStateListOf<BuildRun>()
 
     var onboarded by mutableStateOf(prefs.isSetUp)
@@ -174,10 +190,7 @@ class AppState(application: Application) : AndroidViewModel(application) {
 
     /** Stops the reply in progress. The question stays in the chat. */
     fun stopSend() {
-        sendJob?.cancel()
-        sendJob = null
-        busy = false
-        chatStore.save(chat.toList())
+        emergencyStop()
     }
 
     fun clearHistory() {
@@ -194,7 +207,10 @@ class AppState(application: Application) : AndroidViewModel(application) {
             }
         }
         val att = attachments.toList()
-        val fullPrompt = if (att.isEmpty()) prompt else prompt + "\n\n" + att.joinToString("\n\n") { describe(it) }
+        val base = if (att.isEmpty()) prompt else prompt + "\n\n" + att.joinToString("\n\n") { describe(it) }
+        val notes = commandNotes.toList()
+        commandNotes.clear()
+        val fullPrompt = if (notes.isEmpty()) base else "Results of commands the user ran:\n" + notes.joinToString("\n\n") + "\n\n" + base
         chat.add(UserMsg(if (att.isEmpty()) prompt else prompt + "\n\nAttached: " + att.joinToString { it.name }))
         attachments.clear()
         if (prefs.aiKey.isNullOrBlank()) {
@@ -211,10 +227,11 @@ class AppState(application: Application) : AndroidViewModel(application) {
             }
             chat.add(
                 AssistantMsg(
-                    tool = if (edits.isEmpty()) null else "edit_file",
-                    toolArg = edits.joinToString { it.file }.takeIf { it.isNotEmpty() },
+                    tool = if (edits.isNotEmpty()) "edit_file" else if (result.commands.isNotEmpty()) "run_command" else null,
+                    toolArg = edits.joinToString { it.file }.takeIf { it.isNotEmpty() } ?: result.commands.firstOrNull(),
                     text = result.reply,
                     edits = edits,
+                    commands = result.commands.map { PendingCommand(it) },
                 )
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
@@ -266,10 +283,106 @@ class AppState(application: Application) : AndroidViewModel(application) {
         return Attachment(name, mime, bytes, text)
     }
 
+    // ---------- Terminal commands (class EXEC: every command needs the user's approval) ----------
+
+    /** True while the AI is answering or an approved command is running. */
+    val agentActive: Boolean
+        get() = busy || chat.any { it is AssistantMsg && it.commands.any { c -> c.state == CmdState.Running } }
+
+    fun auditLines(): List<String> = audit.recent()
+
+    fun approveCommand(cmd: PendingCommand) {
+        if (cmd.state != CmdState.Pending) return
+        cmd.state = CmdState.Running
+        audit.record("run_command", "approved", cmd.command)
+        val job = viewModelScope.launch {
+            val app = getApplication<Application>()
+            try {
+                if (!TerminalEngine.isInstalled(app)) {
+                    cmd.output = "Debian is not set up yet. Open Terminal once to set it up, then run this again."
+                    cmd.state = CmdState.Failed
+                    audit.record("run_command", "failed", "Debian is not installed")
+                    return@launch
+                }
+                flushFilesToDisk()
+                val r = TerminalEngine.exec(app, cmd.command)
+                val text = Redactor.redact(r.output).trim()
+                cmd.output = when {
+                    text.isEmpty() -> "(no output)"
+                    r.timedOut -> "$text\n[stopped: time or output limit reached]"
+                    else -> text
+                }
+                cmd.exit = r.exit
+                cmd.state = if (r.exit == 0) CmdState.Done else CmdState.Failed
+                audit.record("run_command", "exit ${r.exit}", cmd.command)
+                commandNotes.add("Command: ${cmd.command}\nExit code: ${r.exit}\nOutput:\n${text.take(4000)}")
+                reloadFilesFromDisk()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                cmd.state = CmdState.Failed
+                cmd.output = "Stopped."
+                audit.record("run_command", "stopped", cmd.command)
+                throw e
+            } catch (e: Exception) {
+                cmd.state = CmdState.Failed
+                cmd.output = e.message ?: "The command could not run."
+                audit.record("run_command", "error", cmd.command)
+            }
+        }
+        execJobs.add(job)
+        job.invokeOnCompletion { execJobs.remove(job) }
+    }
+
+    fun rejectCommand(cmd: PendingCommand) {
+        if (cmd.state != CmdState.Pending) return
+        cmd.state = CmdState.Rejected
+        audit.record("run_command", "rejected", cmd.command)
+    }
+
+    /** The stop control. Cancels the AI reply and every running command, and rejects open approvals. */
+    fun emergencyStop() {
+        sendJob?.cancel()
+        sendJob = null
+        execJobs.forEach { it.cancel() }
+        TerminalEngine.killExec()
+        for (item in chat) {
+            if (item is AssistantMsg) {
+                item.commands.forEach { if (it.state == CmdState.Pending) it.state = CmdState.Rejected }
+                if (item.edits.isNotEmpty() && item.status == EditStatus.Pending) item.status = EditStatus.Rejected
+            }
+        }
+        busy = false
+        audit.record("emergency_stop", "triggered", "")
+        chatStore.save(chat.toList())
+    }
+
+    /** Writes every file to the project folder so the shell sees the latest text. */
+    private suspend fun flushFilesToDisk() {
+        val snapshot = files.toMap()
+        withContext(Dispatchers.IO) { snapshot.forEach { (n, t) -> store.save(n, t) } }
+    }
+
+    /** Reads the project folder back, so files made or changed by a command show up in the editor. */
+    private suspend fun reloadFilesFromDisk() {
+        val disk = withContext(Dispatchers.IO) { store.loadFiles() } ?: emptyMap()
+        for (name in files.keys.toList()) {
+            if (name !in disk) {
+                files.remove(name)
+                openFiles.remove(name)
+            }
+        }
+        for ((n, t) in disk) {
+            if (files[n] != t) files[n] = t
+        }
+        if (activeFile.isNotEmpty() && activeFile !in files) {
+            activeFile = openFiles.lastOrNull() ?: fileNames().firstOrNull().orEmpty()
+        }
+    }
+
     fun accept(msg: AssistantMsg) {
         if (msg.status != EditStatus.Pending) return
         msg.edits.forEach { updateFile(it.file, it.newContent) }
         msg.status = EditStatus.Accepted
+        audit.record("edit_file", "approved", msg.edits.joinToString { it.file })
     }
 
     fun reject(msg: AssistantMsg) {

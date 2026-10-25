@@ -10,7 +10,8 @@ class ProjectStore(context: Context) {
     private val committedFile = File(context.filesDir, "committed.json")
 
     fun loadFiles(): Map<String, String>? {
-        val list = dir.listFiles()?.filter { it.isFile } ?: return null
+        val list = dir.listFiles()?.filter { it.isFile && isValidName(it.name) && it.length() <= 1_000_000 }
+            ?: return null
         if (list.isEmpty()) return null
         return list.sortedBy { it.name }.associate { it.name to it.readText() }
     }

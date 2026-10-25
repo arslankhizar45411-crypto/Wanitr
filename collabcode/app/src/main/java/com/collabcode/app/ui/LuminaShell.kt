@@ -1,6 +1,16 @@
 package com.collabcode.app.ui
 
+import android.Manifest
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.provider.Settings
 import androidx.activity.compose.BackHandler
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.collabcode.app.terminal.Proot
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.horizontalScroll
@@ -34,7 +44,7 @@ import com.collabcode.app.model.UserMsg
 
 enum class MainTab { Home, Explore, History, Settings }
 
-private enum class Page { None, Chat, Editor, Build, Preview }
+private enum class Page { None, Chat, Editor, Build, Preview, Terminal }
 
 data class ChatMode(val label: String, val seed: String, val hint: String)
 
@@ -95,6 +105,9 @@ fun LuminaShell(app: AppState) {
                 Page.Preview -> SubPage("Live preview", { page = Page.None }) {
                     PreviewScreen(app)
                 }
+                Page.Terminal -> SubPage("Terminal", { page = Page.None }) {
+                    TerminalPage()
+                }
                 Page.None -> when (tab) {
                     MainTab.Home -> HomeTab(
                         app = app,
@@ -106,6 +119,7 @@ fun LuminaShell(app: AppState) {
                         onOpenChat = { openChat(it) },
                         onOpenEditor = { page = Page.Editor },
                         onOpenBuild = { page = Page.Build },
+                        onOpenTerminal = { page = Page.Terminal },
                         onNewFile = { showNewFile = true },
                         onCommit = { app.commitAsync(); openChat("") },
                     )
@@ -353,6 +367,7 @@ private fun ExploreTab(
     onOpenChat: (String) -> Unit,
     onOpenEditor: () -> Unit,
     onOpenBuild: () -> Unit,
+    onOpenTerminal: () -> Unit,
     onNewFile: () -> Unit,
     onCommit: () -> Unit,
 ) {
@@ -376,6 +391,7 @@ private fun ExploreTab(
         )
         SettingRow("Code editor", "Edit files on this phone") { onOpenEditor() }
         SettingRow("Build APK", "Compile on GitHub Actions") { onOpenBuild() }
+        SettingRow("Terminal", "Debian Linux on this phone. Sets itself up on first open") { onOpenTerminal() }
         SettingRow("New file", "Add a file to the project") { onNewFile() }
         SettingRow("Commit changes", "Save changes to your GitHub repository") { onCommit() }
         Spacer(Modifier.height(90.dp))
@@ -430,12 +446,39 @@ private fun HistoryTab(app: AppState, onOpenChat: (String) -> Unit) {
 private fun SettingsTab(app: AppState, onEditAi: () -> Unit) {
     val cc = LocalCC.current
     var confirmOut by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var showAudit by remember { mutableStateOf(false) }
+    var storageOk by remember { mutableStateOf(Proot.storageAllowed(context)) }
+    val legacyPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+        storageOk = Proot.storageAllowed(context)
+    }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) storageOk = Proot.storageAllowed(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp, vertical = 8.dp)) {
         Text("Settings", fontFamily = FontFamily.Serif, fontSize = 26.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(12.dp))
         InfoRow("GitHub account", "@${app.githubLogin}")
         InfoRow("Repository", app.prefs.repo.orEmpty())
         SettingRow("AI model", "${app.aiModel} · tap to change the model or key", onEditAi)
+        SettingRow(
+            "Phone storage",
+            if (storageOk) "Allowed. Approved terminal commands can use /sdcard" else "Not allowed. Tap to allow access to phone storage"
+        ) {
+            if (Build.VERSION.SDK_INT >= 30) {
+                context.startActivity(
+                    Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:${context.packageName}"))
+                )
+            } else {
+                legacyPermission.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }
+        SettingRow("Audit log", "Every tool call and approval, newest first") { showAudit = true }
         InfoRow("Privacy", "Data stays on this phone. Tokens and keys are encrypted with the Android Keystore.")
         Spacer(Modifier.height(18.dp))
         OutlinedButton(onClick = { confirmOut = true }, modifier = Modifier.fillMaxWidth()) {
@@ -443,6 +486,7 @@ private fun SettingsTab(app: AppState, onEditAi: () -> Unit) {
         }
         Spacer(Modifier.height(90.dp))
     }
+    if (showAudit) AuditDialog(lines = app.auditLines(), onDismiss = { showAudit = false })
     if (confirmOut) {
         ConfirmDialog(
             title = "Sign out?",
@@ -511,6 +555,9 @@ private fun ChatPage(
                             msg = item,
                             onAccept = { app.accept(item) },
                             onReject = { app.reject(item) },
+                            onRunCommand = { app.approveCommand(it) },
+                            onRejectCommand = { app.rejectCommand(it) },
+                            onStop = { app.emergencyStop() },
                         )
                         is NoticeMsg -> NoticeCard(item)
                     }
@@ -522,8 +569,8 @@ private fun ChatPage(
         }
 
         AttachmentRow(app)
-        if (app.busy) {
-            StopBar(onStop = { app.stopSend() })
+        if (app.agentActive) {
+            StopBar(onStop = { app.emergencyStop() })
         } else {
             Composer(
                 onPlus = { picker.launch("*/*") },
@@ -564,7 +611,7 @@ private fun StopBar(onStop: () -> Unit) {
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Text("Generating...", Modifier.weight(1f), color = cc.muted, fontSize = 14.sp)
+        Text("Working...", Modifier.weight(1f), color = cc.muted, fontSize = 14.sp)
         Box(
             Modifier.size(36.dp).clip(CircleShape).background(cc.text).clickable(onClick = onStop),
             contentAlignment = Alignment.Center

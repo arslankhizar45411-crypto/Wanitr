@@ -55,7 +55,14 @@ internal fun UserBubble(text: String) {
 }
 
 @Composable
-internal fun AssistantCard(msg: AssistantMsg, onAccept: () -> Unit, onReject: () -> Unit) {
+internal fun AssistantCard(
+    msg: AssistantMsg,
+    onAccept: () -> Unit,
+    onReject: () -> Unit,
+    onRunCommand: (PendingCommand) -> Unit = {},
+    onRejectCommand: (PendingCommand) -> Unit = {},
+    onStop: () -> Unit = {},
+) {
     val cc = LocalCC.current
     Column(Modifier.fillMaxWidth()) {
         Text("ASSISTANT", fontSize = 11.sp, color = cc.muted, letterSpacing = 0.5.sp)
@@ -63,6 +70,7 @@ internal fun AssistantCard(msg: AssistantMsg, onAccept: () -> Unit, onReject: ()
         msg.tool?.let { ToolCard(it, msg.toolArg.orEmpty()) }
         Text(msg.text, fontSize = 14.sp, lineHeight = 21.sp, modifier = Modifier.padding(top = 6.dp))
         msg.edits.forEach { DiffBlock(it) }
+        msg.commands.forEach { c -> CommandBlock(c, { onRunCommand(c) }, { onRejectCommand(c) }, onStop) }
         if (msg.edits.isNotEmpty() && msg.status == EditStatus.Pending) {
             Row(
                 Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -212,5 +220,59 @@ fun TerminalScreen() {
             fontSize = 13.sp,
             color = cc.muted
         )
+    }
+}
+
+@Composable
+private fun CommandBlock(cmd: PendingCommand, onRun: () -> Unit, onReject: () -> Unit, onStop: () -> Unit) {
+    val cc = LocalCC.current
+    val shape = RoundedCornerShape(10.dp)
+    val label = when (cmd.state) {
+        CmdState.Pending -> "needs approval"
+        CmdState.Running -> "running"
+        CmdState.Done -> "done"
+        CmdState.Failed -> "failed"
+        CmdState.Rejected -> "rejected"
+    }
+    Column(Modifier.fillMaxWidth().padding(top = 8.dp).clip(shape).border(1.dp, cc.border, shape)) {
+        Row(
+            Modifier.fillMaxWidth().background(cc.surface2).padding(horizontal = 10.dp, vertical = 7.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("run_command · terminal", fontFamily = FontFamily.Monospace, fontSize = 12.5.sp, color = cc.muted)
+            Text(label, fontSize = 12.5.sp, color = if (cmd.state == CmdState.Failed) cc.red else cc.muted)
+        }
+        Text(
+            "$ ${cmd.command}",
+            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 12.5.sp
+        )
+        when (cmd.state) {
+            CmdState.Pending -> Row(
+                Modifier.fillMaxWidth().background(cc.surface2).padding(9.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedButton(onClick = onReject, modifier = Modifier.weight(1f)) { Text("Reject") }
+                Button(onClick = onRun, modifier = Modifier.weight(1f)) { Text("Run") }
+            }
+            CmdState.Running -> Row(
+                Modifier.fillMaxWidth().background(cc.surface2).padding(9.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("Running...", fontSize = 13.sp, color = cc.muted)
+                OutlinedButton(onClick = onStop) { Text("Stop") }
+            }
+            else -> if (cmd.output.isNotEmpty()) {
+                Text(
+                    cmd.output.take(4000),
+                    Modifier.fillMaxWidth().background(cc.surface2).padding(horizontal = 10.dp, vertical = 8.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    color = if (cmd.state == CmdState.Failed) cc.red else cc.muted
+                )
+            }
+        }
     }
 }

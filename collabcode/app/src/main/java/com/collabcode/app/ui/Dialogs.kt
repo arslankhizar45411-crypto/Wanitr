@@ -1,6 +1,11 @@
 package com.collabcode.app.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.AlertDialog
@@ -119,5 +124,30 @@ fun AiSettingsDialog(app: AppState, onDismiss: () -> Unit) {
             ) { Text(if (busy) "Checking..." else "Save") }
         },
         dismissButton = { TextButton(enabled = !busy, onClick = onDismiss) { Text("Cancel") } }
+    )
+}
+
+@Composable
+fun AuditDialog(lines: List<String>, onDismiss: () -> Unit) {
+    val cc = LocalCC.current
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Audit log") },
+        text = {
+            Column(Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
+                if (lines.isEmpty()) {
+                    Text("Nothing recorded yet.", color = cc.muted, fontSize = 13.sp)
+                }
+                lines.takeLast(120).reversed().forEach { line ->
+                    Text(
+                        line,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } }
     )
 }

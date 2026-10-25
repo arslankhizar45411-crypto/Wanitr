@@ -93,6 +93,8 @@ public final class CoreTests {
         check("large input falls back to full replacement",
                 fallback.added == 2001 && fallback.removed == 2001);
 
+        ansiTests();
+
         System.out.println("passed: " + passed + ", failed: " + failures.size());
         for (String f : failures) {
             System.out.println("FAILED: " + f);
@@ -100,5 +102,95 @@ public final class CoreTests {
         if (!failures.isEmpty()) {
             System.exit(1);
         }
+    }
+
+    private static String t(AnsiScreen s, int i) {
+        return s.line(i).text;
+    }
+
+    private static void ansiTests() {
+        AnsiScreen s = new AnsiScreen(80, 24, 1000);
+        s.feed("hello\r\nworld");
+        check("ansi plain text lines", t(s, 0).equals("hello") && t(s, 1).equals("world") && s.lineCount() == 2);
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("abc\rX");
+        check("ansi carriage return overwrites", t(s, 0).equals("Xbc"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("ab\bX");
+        check("ansi backspace", t(s, 0).equals("aX"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("\u001b[31mred\u001b[0m ok");
+        AnsiScreen.LineView v = s.line(0);
+        check("ansi red colour then reset",
+                v.text.equals("red ok") && v.fg[0] == 1 && v.fg[2] == 1 && v.fg[3] == -1 && v.fg[5] == -1);
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("\u001b[1;38;5;196mA\u001b[38;2;10;20;30mB");
+        v = s.line(0);
+        check("ansi bold and 256 colour", (v.attr[0] & AnsiScreen.ATTR_BOLD) != 0 && v.fg[0] == 196);
+        check("ansi true colour", v.fg[1] == (AnsiScreen.RGB_FLAG | (10 << 16) | (20 << 8) | 30));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("hello\u001b[3D\u001b[K");
+        check("ansi erase to end of line", t(s, 0).equals("he"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("a\r\nb\r\n\u001b[H\u001b[2Jc");
+        check("ansi clear keeps scrollback and starts a new screen",
+                t(s, 0).equals("a") && t(s, s.cursorLine()).equals("c"));
+
+        s = new AnsiScreen(20, 5, 10);
+        StringBuilder many = new StringBuilder();
+        for (int i = 0; i < 50; i++) many.append("line").append(i).append("\r\n");
+        s.feed(many.toString());
+        check("ansi scrollback is trimmed", s.lineCount() <= 10 && t(s, s.lineCount() - 2).equals("line49"));
+
+        s = new AnsiScreen(10, 3, 100);
+        s.feed("abcdefghijkl");
+        check("ansi wraps long lines", t(s, 0).equals("abcdefghij") && t(s, 1).equals("kl"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("\u001b]0;title\u0007hi\u001b]8;;x\u001b\\yo");
+        check("ansi titles and links are ignored", t(s, 0).equals("hiyo"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        final String[] reply = new String[1];
+        s.setResponder(r -> reply[0] = r);
+        s.feed("ab\u001b[6n");
+        check("ansi cursor position report", "\u001b[1;3R".equals(reply[0]));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("\u001b[?2004hX\u001b[?25l");
+        check("ansi private modes are ignored", t(s, 0).equals("X"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("abcdef\u001b[3D\u001b[2P");
+        check("ansi delete characters", t(s, 0).equals("abcf"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.setNewlineMode(true);
+        s.feed("a\nb");
+        check("ansi newline mode returns to column 0", t(s, 0).equals("a") && t(s, 1).equals("b"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("\u001b[3");
+        s.feed("1mX");
+        check("ansi sequence split across feeds", t(s, 0).equals("X") && s.line(0).fg[0] == 1);
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("a\tb");
+        check("ansi tab goes to column 8", t(s, 0).length() == 9 && t(s, 0).charAt(8) == 'b');
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("one\r\ntwo\r\n");
+        check("ansi tail returns text", s.tail(100).startsWith("one\ntwo"));
+
+        s = new AnsiScreen(80, 24, 1000);
+        s.feed("abc\u001b[2@");
+        s.feed("\u001b[3D\u001b[2@Z");
+        check("ansi insert characters", t(s, 0).startsWith("Z"));
     }
 }

@@ -36,7 +36,6 @@ jobs:
       - name: Install Android SDK packages
         run: |
           SDKM="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin | head -n 1)/sdkmanager"
-          yes | "$SDKM" --licenses > /dev/null || true
           "$SDKM" "platforms;android-35" "build-tools;35.0.0"
       - uses: gradle/actions/setup-gradle@v4
         with:

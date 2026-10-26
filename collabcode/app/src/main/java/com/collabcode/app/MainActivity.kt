@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.collabcode.app.model.*
+import com.collabcode.app.agent.AgentEngine
 import com.collabcode.app.ui.*
 import kotlinx.coroutines.launch
 
@@ -44,7 +45,8 @@ fun CollabCodeApp() {
             notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
     }
-    if (app.onboarded) LuminaShell(app) else OnboardingHost(app)
+    val agent: AgentEngine = viewModel()
+    AgentRoot(agent)
 }
 
 @Composable

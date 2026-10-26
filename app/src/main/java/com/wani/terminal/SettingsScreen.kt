@@ -1,5 +1,6 @@
 package com.wani.terminal
 
+import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -37,6 +38,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 
+/** Tayyar AI setups. Naam ya model badal sakte hain: provider ki list dekh kar sahi model likhein. */
+private data class AiPreset(val name: String, val baseUrl: String, val model: String)
+
+private val AI_PRESETS = listOf(
+    AiPreset("OpenRouter (free)", "https://openrouter.ai/api/v1", "openrouter/free"),
+    AiPreset("OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
+    AiPreset("Groq (fast)", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    AiPreset("Local on phone", "http://127.0.0.1:8080/v1", "local-model")
+)
+
 @Composable
 fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -> Unit) {
     val ctx = LocalContext.current
@@ -45,8 +56,11 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
     var baseUrl by remember { mutableStateOf(settings.aiBaseUrl) }
     var model by remember { mutableStateOf(settings.aiModel) }
     var apiKey by remember { mutableStateOf(settings.aiApiKey) }
+    var customInstructions by remember { mutableStateOf(settings.aiCustomInstructions) }
     var allowCommands by remember { mutableStateOf(settings.aiAllowCommands) }
     var autoApprove by remember { mutableStateOf(settings.aiAutoApprove) }
+    var showInTerminal by remember { mutableStateOf(settings.aiShowInTerminal) }
+    var shortcuts by remember { mutableStateOf(settings.shortcutKeys) }
     var lightMode by remember { mutableStateOf(!settings.darkTheme) }
     var storageOk by remember { mutableStateOf(StoragePermission.isGranted(ctx)) }
     var saved by remember { mutableStateOf(false) }
@@ -63,13 +77,48 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             SectionTitle("AI assistant")
+            Text("Quick setup", color = Muted, fontSize = 12.sp)
+            AI_PRESETS.chunked(2).forEach { pair ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    pair.forEach { p ->
+                        OutlinedButton(
+                            onClick = {
+                                baseUrl = p.baseUrl
+                                model = p.model
+                                saved = false
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text(p.name, fontSize = 12.sp)
+                        }
+                    }
+                    if (pair.size == 1) Spacer(Modifier.weight(1f))
+                }
+            }
             SettingField("API base URL", baseUrl, { baseUrl = it; saved = false }, "https://openrouter.ai/api/v1")
             SettingField("Model", model, { model = it; saved = false }, "openrouter/free")
             SettingField("API key", apiKey, { apiKey = it; saved = false }, "paste your key", secret = true)
             Text(
-                "Works with any OpenAI-compatible API. Local server on this phone: http://127.0.0.1:PORT/v1 (key can be empty). The key is stored only on this phone.",
+                "Works with any OpenAI-compatible API. Model names change often, so check your provider's list. " +
+                    "Local server on this phone: http://127.0.0.1:PORT/v1 (key can be empty). The key is stored only on this phone.",
                 color = Muted,
                 fontSize = 12.sp
+            )
+
+            OutlinedTextField(
+                value = customInstructions,
+                onValueChange = { customInstructions = it; saved = false },
+                label = { Text("Extra instructions for the AI") },
+                placeholder = {
+                    Text("Example: reply in Urdu. Prefer apt-get. Ask me before deleting any file.", color = Muted)
+                },
+                textStyle = TextStyle(color = TextMain, fontSize = 14.sp),
+                minLines = 3,
+                maxLines = 8,
+                modifier = Modifier.fillMaxWidth()
             )
 
             ToggleRow(
@@ -85,6 +134,12 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
                 onChange = { autoApprove = it; saved = false }
             )
             ToggleRow(
+                title = "Show AI actions in terminal",
+                subtitle = "AI commands and their output also appear in the terminal screen.",
+                checked = showInTerminal,
+                onChange = { showInTerminal = it; saved = false }
+            )
+            ToggleRow(
                 title = "Light theme",
                 subtitle = "Off = dark theme. The terminal always stays dark.",
                 checked = lightMode,
@@ -95,6 +150,83 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
                 }
             )
 
+            Button(
+                onClick = {
+                    settings.aiBaseUrl = baseUrl
+                    settings.aiModel = model
+                    settings.aiApiKey = apiKey
+                    settings.aiCustomInstructions = customInstructions
+                    settings.aiAllowCommands = allowCommands
+                    settings.aiAutoApprove = autoApprove
+                    settings.aiShowInTerminal = showInTerminal
+                    baseUrl = settings.aiBaseUrl
+                    model = settings.aiModel
+                    apiKey = settings.aiApiKey
+                    customInstructions = settings.aiCustomInstructions
+                    saved = true
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
+            ) {
+                Text("Save settings", fontWeight = FontWeight.Bold)
+            }
+            if (saved) {
+                Text("Saved.", color = Accent, fontSize = 12.sp)
+            }
+
+            Spacer(Modifier.height(8.dp))
+            SectionTitle("Shortcut bar")
+            Text(
+                "Tap a button to show or hide it at the bottom of the terminal. Shown buttons keep this order. " +
+                    "Backspace is not in the bar: use your keyboard's delete key.",
+                color = Muted,
+                fontSize = 12.sp
+            )
+            ShortcutKeys.ALL.chunked(4).forEach { row ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    row.forEach { k ->
+                        val on = k.id in shortcuts
+                        KeyButton(k.label, Modifier.weight(1f), active = on) {
+                            val next = if (on) shortcuts - k.id else shortcuts + k.id
+                            // Bar khali na ho, isliye kam se kam ek button hamesha rehta hai
+                            if (next.isNotEmpty()) {
+                                shortcuts = next
+                                settings.shortcutKeys = next
+                            }
+                        }
+                    }
+                    repeat(4 - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+            OutlinedButton(onClick = {
+                shortcuts = ShortcutKeys.DEFAULT
+                settings.shortcutKeys = ShortcutKeys.DEFAULT
+            }) {
+                Text("Reset shortcut bar", fontSize = 12.sp)
+            }
+
+            Spacer(Modifier.height(8.dp))
+            SectionTitle("Run 24/7")
+            Text(
+                "The AI keeps working while the app runs in the background (Wani shows a notification). " +
+                    "On some phones, battery saving stops background apps. Set Wani to unrestricted to keep it running.",
+                color = Muted,
+                fontSize = 12.sp
+            )
+            OutlinedButton(onClick = {
+                runCatching {
+                    ctx.startActivity(
+                        Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    )
+                }
+            }) {
+                Text("Open battery settings")
+            }
+
+            Spacer(Modifier.height(8.dp))
             SectionTitle("Storage")
             Text(
                 if (storageOk) {
@@ -112,26 +244,6 @@ fun SettingsScreen(settings: AppSettings, onBack: () -> Unit, onOpenGitHub: () -
                 ) {
                     Text("Allow storage", fontWeight = FontWeight.Bold)
                 }
-            }
-
-            Button(
-                onClick = {
-                    settings.aiBaseUrl = baseUrl
-                    settings.aiModel = model
-                    settings.aiApiKey = apiKey
-                    settings.aiAllowCommands = allowCommands
-                    settings.aiAutoApprove = autoApprove
-                    baseUrl = settings.aiBaseUrl
-                    model = settings.aiModel
-                    apiKey = settings.aiApiKey
-                    saved = true
-                },
-                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Color.Black)
-            ) {
-                Text("Save settings", fontWeight = FontWeight.Bold)
-            }
-            if (saved) {
-                Text("Saved.", color = Accent, fontSize = 12.sp)
             }
 
             Spacer(Modifier.height(8.dp))

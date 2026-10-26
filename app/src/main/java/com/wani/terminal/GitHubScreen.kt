@@ -64,6 +64,8 @@ fun GitHubScreen(settings: AppSettings, onBack: () -> Unit) {
                 "Failed: ${e.message ?: e.toString()}" to null
             }
             status = result.first
+            // State sirf main thread par badlo (token saved ho to connected)
+            connected = settings.githubToken.isNotBlank()
             result.second?.let { runUrl = it }
             busy = false
         }
@@ -90,7 +92,6 @@ fun GitHubScreen(settings: AppSettings, onBack: () -> Unit) {
             settings.githubRepo = repoName
             settings.githubWorkflow = wf
             settings.githubBranch = br
-            connected = true
             "Connected as @$login. Token saved on this phone." to null
         }
     }
